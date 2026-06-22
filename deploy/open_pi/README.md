@@ -1,0 +1,150 @@
+# OpenPI Franka Dual Server
+
+This directory serves the RLinf OpenPI pi0.5 SFT model for the separate
+`franka_rdk` robot machine.
+
+## Protocol
+
+The server matches `franka_rdk`'s OpenPI client:
+
+```text
+POST /infer
+Content-Type: application/msgpack
+```
+
+Request:
+
+```python
+{
+    "state": np.ndarray,   # raw [16], compatibility/debug field
+    "images": {...},       # raw compatibility/debug field
+    "openpi": {
+        "state": np.ndarray,      # [32] q01/q99 normalized and padded
+        "state_mask": np.ndarray, # [32] bool
+        "images": {
+            "base_0_rgb": np.ndarray,        # [3,224,224] float32 in [-1,1]
+            "left_wrist_0_rgb": np.ndarray,  # [3,224,224] float32 in [-1,1]
+            "right_wrist_0_rgb": np.ndarray, # [3,224,224] float32 in [-1,1]
+        },
+        "image_mask": {...},
+        "action_q01": np.ndarray, # [32]
+        "action_q99": np.ndarray, # [32]
+    },
+    "prompt": str,
+}
+```
+
+The strict path uses the client-preprocessed `payload["openpi"]` block. The
+server does not redo q01/q99 state normalization or image resize/pad on this
+path; it only tokenizes the prompt, builds an OpenPI `Observation`, and calls
+`sample_actions(...)`. The raw top-level `state/images` remain for old server
+compatibility.
+
+The old raw fallback can be forced with `--ignore-client-preprocessed-payload`,
+but it is not the strict Franka-dual comparison path unless that server also
+reproduces the same q01/q99 state normalization and action inverse.
+
+Response:
+
+```python
+{"actions": np.ndarray}  # shape [n_action_steps, 16]
+```
+
+The first 16 action dimensions are:
+
+```text
+left_joint_positions_0..7 + right_joint_positions_0..7
+```
+
+The OpenPI model internally uses the 32-d padded action/state format used during
+SFT. The server slices the normalized model output to 16 dims;
+`openpi_pi05_client` applies the action q01/q99 inverse before commanding the
+robot.
+
+Checkpoint note: this SFT run used FSDP with `sharding_strategy: no_shard`.
+Although the directory is named `local_shard_checkpoint`, each
+`checkpoint_rank_*.pt` file contains a full model copy. The server loads
+`checkpoint_rank_0.pt` by default.
+
+## Start Server
+
+Use the `rlinf_openpi` environment:
+
+```bash
+cd /inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf
+conda activate rlinf_openpi
+
+bash deploy/open_pi/run_franka_dual_openpi_server.sh
+```
+
+Defaults:
+
+```text
+OpenPI cache:
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/openpi_cache
+
+base model:
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/pi05_base_pytorch_real_world_joint
+
+SFT checkpoint:
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/real_world_franka_dual_openpi_pi05_sft/checkpoints/global_step_20000
+
+server:
+  0.0.0.0:8000
+```
+
+The launch script sets `OPENPI_DATA_HOME` to the same cache path used by the
+SFT training script, so OpenPI can find
+`big_vision/paligemma_tokenizer.model` without downloading from GCS.
+
+Common overrides:
+
+```bash
+DEVICE=cuda:1 \
+PORT=8001 \
+N_ACTION_STEPS=48 \
+DEFAULT_PROMPT="fold the box" \
+bash deploy/open_pi/run_franka_dual_openpi_server.sh
+```
+
+If you want to use another checkpoint:
+
+```bash
+CHECKPOINT_PATH=/path/to/global_step_xxxxx \
+bash deploy/open_pi/run_franka_dual_openpi_server.sh
+```
+
+`CHECKPOINT_PATH` can be either the `global_step_xxxxx` directory or a direct
+`checkpoint_rank_0.pt` file.
+
+## Smoke Test
+
+After the server is up:
+
+```bash
+python deploy/open_pi/test_openpi_server_client.py \
+  --host http://127.0.0.1:8000 \
+  --prompt "fold the box"
+```
+
+Expected output:
+
+```text
+actions.shape = (48, 16)
+```
+
+## Robot Machine
+
+On the `franka_rdk` machine, point its OpenPI client at this server:
+
+```bash
+--policy.type=openpi_pi05_client
+--policy.host=http://<GPU_SERVER_IP>:8000
+--policy.default_prompt="fold the box"
+--policy.stats_task_id=fold_box
+```
+
+`openpi_pi05_client` already sets `n_action_steps=48`,
+`execute_full_action_chunk=true`, `image_payload_format=raw_hwc`, and
+`server_returns_normalized_actions=true`. It also sends the `payload["openpi"]`
+block consumed by this server.
