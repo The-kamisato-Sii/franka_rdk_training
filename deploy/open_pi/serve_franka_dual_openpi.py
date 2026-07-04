@@ -34,9 +34,9 @@ The returned actions are normalized OpenPI model outputs. ``openpi_pi05_client``
 defaults to ``server_returns_normalized_actions=true`` and applies q01/q99
 inverse normalization before sending commands to the robot.
 
-The model checkpoint is an RLinf local-shard checkpoint. For this OpenPI SFT
-run, rank 0 contains a loadable model state dict, so inference does not need
-Ray/FSDP; it loads ``actor/local_shard_checkpoint/checkpoint_rank_0.pt``.
+The model can either load an RLinf local-shard checkpoint on top of
+``base_model_path`` or, when ``checkpoint_path`` is disabled, serve the complete
+``model.safetensors`` stored in ``base_model_path`` directly.
 """
 
 
@@ -247,6 +247,11 @@ def resolve_checkpoint_file(path: Path, rank: int) -> Path:
     )
 
 
+def checkpoint_path_is_disabled(path: Any) -> bool:
+    text = "" if path is None else str(path).strip()
+    return text.lower() in ("", "none", "null", "skip", "disabled")
+
+
 class OpenPIFrankaDualRunner:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -307,6 +312,15 @@ class OpenPIFrankaDualRunner:
         from rlinf.models.embodiment.openpi import get_model
 
         model = get_model(self._base_cfg(), torch_dtype=self._torch_dtype())
+        if checkpoint_path_is_disabled(self.args.checkpoint_path):
+            print(
+                "[open_pi] CHECKPOINT_PATH disabled; using weights from "
+                f"BASE_MODEL_PATH={self.args.base_model_path}",
+                flush=True,
+            )
+            model.to(self.device)
+            return model
+
         ckpt_file = resolve_checkpoint_file(
             Path(self.args.checkpoint_path), int(self.args.checkpoint_rank)
         )

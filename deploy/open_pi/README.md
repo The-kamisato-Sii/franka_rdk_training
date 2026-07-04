@@ -118,6 +118,49 @@ bash deploy/open_pi/run_franka_dual_openpi_server.sh
 `CHECKPOINT_PATH` can be either the `global_step_xxxxx` directory or a direct
 `checkpoint_rank_0.pt` file.
 
+## Official OpenPI Checkpoints
+
+Official OpenPI training saves JAX/Orbax checkpoints, for example:
+
+```text
+/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999
+```
+
+This cannot be passed to `CHECKPOINT_PATH` directly. Convert it to a complete
+PyTorch `model.safetensors` directory first:
+
+```bash
+bash -c '
+source /inspire/hdd/project/robot-body/linbokai-CZXS24250037/miniconda/etc/profile.d/conda.sh
+conda activate /inspire/hdd/project/robot-body/linbokai-CZXS24250037/miniconda/envs/openpi
+cd /inspire/hdd/project/robot-body/linbokai-CZXS24250037/openpi
+export PYTHONPATH=/inspire/hdd/project/robot-body/linbokai-CZXS24250037/openpi/src:${PYTHONPATH:-}
+export OPENPI_DATA_HOME=/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/openpi_cache
+python examples/convert_jax_model_to_pytorch.py \
+  --checkpoint-dir /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999 \
+  --config-name pi05_franka_dual_test \
+  --output-path /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch \
+  --precision float32
+mkdir -p /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_franka_dual
+cp /inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test/norm_stats.json \
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_franka_dual/norm_stats.json
+'
+```
+
+Serve the converted directory as the base model and disable local-shard loading:
+
+```bash
+BASE_MODEL_PATH=/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch \
+CHECKPOINT_PATH=none \
+N_ACTION_STEPS=48 \
+RETURN_ACTION_DIM=16 \
+bash deploy/open_pi/run_franka_dual_openpi_server.sh
+```
+
+For official-converted checkpoints, `BASE_MODEL_PATH` is the converted full
+model directory. `CHECKPOINT_PATH=none` is intentional; it tells the server not
+to look for an RLinf `actor/local_shard_checkpoint/checkpoint_rank_0.pt`.
+
 Before `global_step_10000` exists, the current v2 checkpoint can be served with:
 
 ```bash
