@@ -30,10 +30,10 @@ deployment logic.
 
 All three model families enter training through:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/train_vla_sft.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/runners/sft_runner.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/workers/sft/fsdp_vla_sft_worker.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/workers/sft/fsdp_sft_worker.py`
+- `examples/sft/train_vla_sft.py`
+- `rlinf/runners/sft_runner.py`
+- `rlinf/workers/sft/fsdp_vla_sft_worker.py`
+- `rlinf/workers/sft/fsdp_sft_worker.py`
 
 `train_vla_sft.py` builds an `FSDPVlaSftWorker`; `SFTRunner.run()` repeatedly
 calls `actor.run_training()`. The base worker accumulates micro-batches, calls
@@ -49,14 +49,14 @@ The VLA worker dispatches by `actor.model.model_type`:
 
 Main scripts/configs:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft_debug.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_openpi_pi05_sft.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/openpi/real_world_joint.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/dataconfig/__init__.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/dataconfig/real_world_joint_dataconfig.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/policies/real_world_joint_policy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/openpi_action_model.py`
+- `examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft.sh`
+- `examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft_debug.sh`
+- `examples/sft/config/real_world_franka_dual_openpi_pi05_sft.yaml`
+- `rlinf/data/datasets/openpi/real_world_joint.py`
+- `rlinf/models/embodiment/openpi/dataconfig/__init__.py`
+- `rlinf/models/embodiment/openpi/dataconfig/real_world_joint_dataconfig.py`
+- `rlinf/models/embodiment/openpi/policies/real_world_joint_policy.py`
+- `rlinf/models/embodiment/openpi/openpi_action_model.py`
 
 Current OpenPI config facts:
 
@@ -128,18 +128,18 @@ Important OpenPI checks:
 
 Main scripts/configs:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_multi_node.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_debug.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_dreamzero_sft.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_dreamzero_sft_debug.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/real_world_joint.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/dreamzero.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/sampling_strategy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/__init__.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/dreamzero_policy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/patch/wan_causal_model_forward_train.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/groot/vla/model/dreamzero/action_head/wan_flow_matching_action_tf.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_multi_node.sh`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_debug.sh`
+- `examples/sft/config/real_world_franka_dual_dreamzero_sft.yaml`
+- `examples/sft/config/real_world_franka_dual_dreamzero_sft_debug.yaml`
+- `rlinf/data/datasets/dreamzero/real_world_joint.py`
+- `rlinf/data/datasets/dreamzero/dreamzero.py`
+- `rlinf/data/datasets/dreamzero/sampling_strategy.py`
+- `rlinf/models/embodiment/dreamzero/__init__.py`
+- `rlinf/models/embodiment/dreamzero/dreamzero_policy.py`
+- `rlinf/models/embodiment/dreamzero/patch/wan_causal_model_forward_train.py`
+- `../dreamzero/groot/vla/model/dreamzero/action_head/wan_flow_matching_action_tf.py`
+- `../dreamzero/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py`
 
 Current DreamZero config facts:
 
@@ -236,9 +236,9 @@ Important DreamZero checks:
 
 Main scripts/configs:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_sft_multi_node.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_continue_sft_multi_node.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_wmam_motion_sft.yaml`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_sft_multi_node.sh`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_continue_sft_multi_node.sh`
+- `examples/sft/config/real_world_franka_dual_wmam_motion_sft.yaml`
 
 WMAM uses the same DreamZero real-world joint dataset path, temporal sampler,
 state/action normalization, padding, masking, and embodiment mapping, but enables
@@ -305,15 +305,15 @@ real-world data. Do not rely on memory. Read the code on `qizhi-local`.
 
 Required files:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_openpi_pi05_sft.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/openpi/real_world_joint.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/dataconfig/__init__.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/dataconfig/real_world_joint_dataconfig.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/policies/real_world_joint_policy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/openpi/openpi_action_model.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/deploy/open_pi/serve_franka_dual_openpi.py`
-- `/home/franka/franka_rdk/lerobot/src/lerobot/policies/openpi_client/processor_openpi_client.py`
+- `examples/sft/pi_05/run_real_world_franka_dual_openpi_pi05_sft.sh`
+- `examples/sft/config/real_world_franka_dual_openpi_pi05_sft.yaml`
+- `rlinf/data/datasets/openpi/real_world_joint.py`
+- `rlinf/models/embodiment/openpi/dataconfig/__init__.py`
+- `rlinf/models/embodiment/openpi/dataconfig/real_world_joint_dataconfig.py`
+- `rlinf/models/embodiment/openpi/policies/real_world_joint_policy.py`
+- `rlinf/models/embodiment/openpi/openpi_action_model.py`
+- `deploy/open_pi/serve_franka_dual_openpi.py`
+- `external franka machine: /home/franka/franka_rdk/lerobot/src/lerobot/policies/openpi_client/processor_openpi_client.py`
 
 Tasks:
 
@@ -345,22 +345,22 @@ against `https://github.com/dreamzero0/dreamzero`.
 
 Required files:
 
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_multi_node.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_sft_multi_node.sh`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_dreamzero_sft.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/examples/sft/config/real_world_franka_dual_wmam_motion_sft.yaml`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/real_world_joint.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/dreamzero.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/data/datasets/dreamzero/sampling_strategy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/__init__.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/dreamzero_policy.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/rlinf/models/embodiment/dreamzero/patch/wan_causal_model_forward_train.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/groot/vla/model/dreamzero/action_head/wan_flow_matching_action_tf.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/deploy/dreamzero/serve_franka_dual_dreamzero.py`
-- `/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/deploy/wmam/serve_franka_dual_wmam.py`
-- `/home/franka/franka_rdk/lerobot/src/lerobot/policies/dreamzero_client/processor_dreamzero_client.py`
-- `/home/franka/franka_rdk/lerobot/src/lerobot/policies/wmam_client/processor_wmam_client.py`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_dreamzero_sft_multi_node.sh`
+- `examples/sft/dreamzero/dreamzero_real_world_sft/run_real_world_franka_dual_wmam_motion_sft_multi_node.sh`
+- `examples/sft/config/real_world_franka_dual_dreamzero_sft.yaml`
+- `examples/sft/config/real_world_franka_dual_wmam_motion_sft.yaml`
+- `rlinf/data/datasets/dreamzero/real_world_joint.py`
+- `rlinf/data/datasets/dreamzero/dreamzero.py`
+- `rlinf/data/datasets/dreamzero/sampling_strategy.py`
+- `rlinf/models/embodiment/dreamzero/__init__.py`
+- `rlinf/models/embodiment/dreamzero/dreamzero_policy.py`
+- `rlinf/models/embodiment/dreamzero/patch/wan_causal_model_forward_train.py`
+- `../dreamzero/groot/vla/model/dreamzero/action_head/wan_flow_matching_action_tf.py`
+- `../dreamzero/groot/vla/model/dreamzero/modules/wan_video_dit_action_casual_chunk.py`
+- `deploy/dreamzero/serve_franka_dual_dreamzero.py`
+- `deploy/wmam/serve_franka_dual_wmam.py`
+- `external franka machine: /home/franka/franka_rdk/lerobot/src/lerobot/policies/dreamzero_client/processor_dreamzero_client.py`
+- `external franka machine: /home/franka/franka_rdk/lerobot/src/lerobot/policies/wmam_client/processor_wmam_client.py`
 
 Tasks:
 
