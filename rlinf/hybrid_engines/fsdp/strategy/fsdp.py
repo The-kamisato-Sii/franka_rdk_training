@@ -463,6 +463,10 @@ class FSDPStrategy(FSDPStrategyBase):
         Returns:
             - ContextManager: The context manager for gradient synchronization.
         """
+        if self.cfg.fsdp_config.use_orig_params:
+            for handle in self._iter_fsdp_handles(model):
+                self._rebind_handle_views(handle)
+
         if self.cfg.fsdp_config.enable_gradient_accumulation:
             return model.no_sync() if not is_last_micro_batch else nullcontext()
         return nullcontext()

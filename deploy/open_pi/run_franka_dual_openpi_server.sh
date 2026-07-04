@@ -23,20 +23,24 @@ export TORCH_COMPILE_DISABLE=${TORCH_COMPILE_DISABLE:-1}
 export TORCHDYNAMO_DISABLE=${TORCHDYNAMO_DISABLE:-1}
 
 BASE_MODEL_PATH=${BASE_MODEL_PATH:-"${REPO_ROOT}/checkpoints/pi05_base_pytorch_real_world_joint"}
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-"${PROJECT_ROOT}/results/real_world_franka_dual_openpi_pi05_sft/checkpoints/global_step_20000"}
+CHECKPOINT_PATH=${CHECKPOINT_PATH:-"${PROJECT_ROOT}/results/real_world_franka_dual_openpi_pi05_sft_arrange_vegetables/checkpoints/global_step_20000"}
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-8000}
 DEVICE=${DEVICE:-cuda:0}
-PRECISION=${PRECISION:-bfloat16}
-IMAGE_PAYLOAD_FORMAT=${IMAGE_PAYLOAD_FORMAT:-raw_hwc}
+# Keep serving in float32 by default. The RLinf wrapper does not cast every
+# generated sampling tensor to bf16, so bf16 serving can fail with
+# "mat1 and mat2 must have the same dtype".
+PRECISION=${PRECISION:-float32}
 N_ACTION_STEPS=${N_ACTION_STEPS:-48}
 RETURN_ACTION_DIM=${RETURN_ACTION_DIM:-16}
+NUM_STEPS=${NUM_STEPS:-5}
+NOISE_METHOD=${NOISE_METHOD:-flow_sde}
+NOISE_LEVEL=${NOISE_LEVEL:-0.5}
 DEFAULT_PROMPT=${DEFAULT_PROMPT:-""}
-ALLOW_LEGACY_224_CHW=${ALLOW_LEGACY_224_CHW:-0}
-
-EXTRA_ARGS=()
-if [[ "${ALLOW_LEGACY_224_CHW}" == "1" || "${ALLOW_LEGACY_224_CHW}" == "true" ]]; then
-  EXTRA_ARGS+=(--allow-legacy-224-chw)
+LOG_INPUT_OUTPUT=${LOG_INPUT_OUTPUT:-false}
+LOG_INPUT_OUTPUT_ARGS=()
+if [[ "${LOG_INPUT_OUTPUT}" == "true" || "${LOG_INPUT_OUTPUT}" == "1" || "${LOG_INPUT_OUTPUT}" == "yes" ]]; then
+  LOG_INPUT_OUTPUT_ARGS+=(--log-input-output)
 fi
 
 echo "[open_pi] REPO_ROOT=${REPO_ROOT}"
@@ -48,9 +52,12 @@ echo "[open_pi] HOST=${HOST}"
 echo "[open_pi] PORT=${PORT}"
 echo "[open_pi] DEVICE=${DEVICE}"
 echo "[open_pi] PRECISION=${PRECISION}"
-echo "[open_pi] IMAGE_PAYLOAD_FORMAT=${IMAGE_PAYLOAD_FORMAT}"
 echo "[open_pi] N_ACTION_STEPS=${N_ACTION_STEPS}"
 echo "[open_pi] RETURN_ACTION_DIM=${RETURN_ACTION_DIM}"
+echo "[open_pi] NUM_STEPS=${NUM_STEPS}"
+echo "[open_pi] NOISE_METHOD=${NOISE_METHOD}"
+echo "[open_pi] NOISE_LEVEL=${NOISE_LEVEL}"
+echo "[open_pi] LOG_INPUT_OUTPUT=${LOG_INPUT_OUTPUT}"
 
 "${PYTHON_BIN}" "${SCRIPT_DIR}/serve_franka_dual_openpi.py" \
   --host "${HOST}" \
@@ -59,9 +66,11 @@ echo "[open_pi] RETURN_ACTION_DIM=${RETURN_ACTION_DIM}"
   --precision "${PRECISION}" \
   --base-model-path "${BASE_MODEL_PATH}" \
   --checkpoint-path "${CHECKPOINT_PATH}" \
-  --image-payload-format "${IMAGE_PAYLOAD_FORMAT}" \
   --n-action-steps "${N_ACTION_STEPS}" \
   --return-action-dim "${RETURN_ACTION_DIM}" \
+  --num-steps "${NUM_STEPS}" \
+  --noise-method "${NOISE_METHOD}" \
+  --noise-level "${NOISE_LEVEL}" \
   --default-prompt "${DEFAULT_PROMPT}" \
-  "${EXTRA_ARGS[@]}" \
+  "${LOG_INPUT_OUTPUT_ARGS[@]}" \
   "$@"

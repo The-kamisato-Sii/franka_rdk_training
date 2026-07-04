@@ -56,6 +56,9 @@ from rlinf.models.embodiment.openpi.dataconfig.metaworld_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.realworld_dataconfig import (
     LeRobotRealworldDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.real_world_joint_dataconfig import (
+    LeRobotRealWorldJointDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
     LeRobotRobocasaDataConfig,
 )
@@ -64,6 +67,36 @@ from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import 
 )
 
 _CONFIGS = [
+    TrainConfig(
+        name="pi0_real_world_joint",
+        model=pi0_config.Pi0Config(action_horizon=48),
+        data=LeRobotRealWorldJointDataConfig(
+            repo_id="real_world_joint",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi0_real_world_joint/assets"),
+            action_env_dim=32,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi0_base/params"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi0_base",
+    ),
+    TrainConfig(
+        name="pi05_real_world_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=48, discrete_state_input=True
+        ),
+        data=LeRobotRealWorldJointDataConfig(
+            repo_id="real_world_joint",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(assets_dir="checkpoints/torch/pi05_real_world_joint/assets"),
+            action_env_dim=32,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/jax/pi05_base"
+        ),
+        pytorch_weight_path="checkpoints/torch/pi05_base",
+    ),
     TrainConfig(
         name="pi0_libero",
         model=pi0_config.Pi0Config(),

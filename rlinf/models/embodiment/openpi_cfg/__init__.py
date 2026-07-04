@@ -17,13 +17,38 @@ import torch
 from omegaconf import DictConfig
 
 
+def _resolve_target_dtype(cfg: DictConfig, torch_dtype=None):
+    if torch_dtype is not None:
+        return torch_dtype
+    precision = getattr(cfg, "precision", None)
+    if precision is None:
+        return None
+    precision = str(precision).lower()
+    if precision in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if precision in ("fp16", "float16", "half"):
+        return torch.float16
+    if precision in ("fp32", "float32", "float"):
+        return torch.float32
+    return None
+
+
+def _cast_floating_tensors(module: torch.nn.Module, dtype: torch.dtype) -> None:
+    for param in module.parameters():
+        if param.is_floating_point() and param.dtype != dtype:
+            param.data = param.data.to(dtype=dtype)
+    for buffer in module.buffers():
+        if buffer.is_floating_point() and buffer.dtype != dtype:
+            buffer.data = buffer.data.to(dtype=dtype)
+
+
 def get_model(cfg: DictConfig, torch_dtype=None):
     import glob
 
     import openpi.shared.download as download
+    import openpi.shared.normalize as normalize
     import openpi.transforms as transforms
     import safetensors
-    from openpi.training import checkpoints as _checkpoints
 
     from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
     from rlinf.models.embodiment.openpi_cfg.openpi_cfg_action_model import (
@@ -68,12 +93,15 @@ def get_model(cfg: DictConfig, torch_dtype=None):
             safetensors.torch.load_model(model, weight_path, strict=False)
 
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+    target_dtype = _resolve_target_dtype(cfg, torch_dtype)
+    if target_dtype is not None:
+        _cast_floating_tensors(model, target_dtype)
     data_config = actor_train_config.data.create(
         actor_train_config.assets_dirs, actor_model_config
     )
     if data_config.asset_id is None:
         raise ValueError("Asset id is required to load norm stats.")
-    norm_stats = _checkpoints.load_norm_stats(checkpoint_dir, data_config.asset_id)
+    norm_stats = normalize.load(os.path.join(checkpoint_dir, data_config.asset_id))
 
     repack_transforms = transforms.Group()
     default_prompt = None

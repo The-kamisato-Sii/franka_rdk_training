@@ -21,3 +21,65 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+
+# ---------------------------------------------------------------------------
+# Local training artifacts and large generated files
+# ---------------------------------------------------------------------------
+/.cache/
+/checkpoints/
+/data/
+/datasets/
+/outputs/
+/results*/
+/wandb/
+
+**/wandb/
+**/tensorboard/
+**/events.out.tfevents.*
+**/runs/
+**/log/
+**/logs/
+
+# Ray runtime markers/state. Keep ray_utils scripts trackable.
+/ray_utils/ray_done*
+/ray_utils/ray_head_ip.txt
+
+# Model/checkpoint artifacts.
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.msgpack
+*.onnx
+*.tflite
+*.gguf
+
+# Dataset/media artifacts.
+*.parquet
+*.arrow
+*.h5
+*.hdf5
+*.zarr
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.bag
+
+# Archives and large packaged outputs.
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Local debug dumps / backup files.
+*.bak
+*.bak_*
+*.tmp
+*.swp
+core
+core.*

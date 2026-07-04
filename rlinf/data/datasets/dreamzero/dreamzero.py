@@ -24,11 +24,8 @@ import torch
 from torch.utils.data import Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from rlinf.data.datasets.dreamzero.data_transforms import (
-    format_training_prompt,
-    normalize_instruction_text,
-)
 from rlinf.data.datasets.dreamzero.sampling_strategy import (
+    DEFAULT_VIDEO_IN_CHUNK_OFFSETS,
     EmptyTemporalSampleError,
     MultiAnchorTemporalConfig,
     SamplingMode,
@@ -79,6 +76,8 @@ class DreamZeroLeRobotDataset(Dataset):
         video_backend: str = "pyav",
         sampling_mode: SamplingMode = "multi_anchor",
         multi_anchor_resample_attempts: int = 8,
+        macro_stride: int | None = None,
+        video_in_chunk_offsets: tuple[int, ...] | list[int] | None = None,
     ):
         if isinstance(data_path, (list, tuple)):
             if len(data_path) == 0:
@@ -178,9 +177,19 @@ class DreamZeroLeRobotDataset(Dataset):
             self._multi_anchor_cfg = None
         else:
             self._fixed_window_temporal = None
+            if macro_stride is None:
+                resolved_macro_stride = self.action_horizon
+            else:
+                resolved_macro_stride = int(macro_stride)
+            if video_in_chunk_offsets is None:
+                resolved_video_offsets = DEFAULT_VIDEO_IN_CHUNK_OFFSETS
+            else:
+                resolved_video_offsets = tuple(int(x) for x in video_in_chunk_offsets)
             self._multi_anchor_cfg = MultiAnchorTemporalConfig(
                 max_chunk_size=self.max_chunk_size,
                 action_horizon=self.action_horizon,
+                macro_stride=resolved_macro_stride,
+                video_in_chunk_offsets=resolved_video_offsets,
             )
         if self._use_lazy_video_tree:
             self._init_lazy_map_style(pq_cache_max_episodes, video_tolerance_s)
@@ -297,8 +306,18 @@ class DreamZeroLeRobotDataset(Dataset):
         if inferred is None and len(missing_short_keys) == 1:
             inferred = {missing_short_keys[0]: slice(0, dim or None)}
         if inferred is None:
+            franka_dual_slices = {
+                "left_joint_angle": slice(0, 7),
+                "left_joint_gripper": slice(7, 8),
+                "right_joint_angle": slice(8, 15),
+                "right_joint_gripper": slice(15, 16),
+            }
+            if dim >= 16 and set(missing_short_keys).issubset(franka_dual_slices):
+                inferred = {
+                    key: franka_dual_slices[key] for key in missing_short_keys
+                }
             # Backward-compatible DROID fallback when meta names are missing.
-            if set(missing_short_keys).issubset({"joint_position", "gripper_position"}):
+            elif set(missing_short_keys).issubset({"joint_position", "gripper_position"}):
                 st_j, st_g, ac_j, ac_g = droid_default_state_action_slices()
                 inferred = (
                     {"joint_position": st_j, "gripper_position": st_g}
@@ -338,23 +357,32 @@ class DreamZeroLeRobotDataset(Dataset):
         if not self._data_tmpl:
             raise ValueError("meta/info.json missing data_path")
 
-        meta_episode_indices: set[int] = set()
-        episode_lengths: dict[int, int] = {}
-        with open(self._meta_dir / "episodes.jsonl") as epf:
-            for line in epf:
-                if not line.strip():
-                    continue
-                obj = json.loads(line)
-                ep_idx = int(obj.get("episode_index", 0))
-                meta_episode_indices.add(ep_idx)
-                for k in ("episode_length", "length", "num_frames", "num_steps"):
-                    if obj.get(k) is not None:
-                        episode_lengths[ep_idx] = int(obj[k])
-                        break
+        self._episode_data_files: dict[int, tuple[int, int]] = {}
+        self._episode_data_row_bounds: dict[int, tuple[int, int]] = {}
+        self._episode_video_files: dict[tuple[int, str], tuple[int, int]] = {}
+        self._episode_video_start_ts: dict[tuple[int, str], float] = {}
 
-        self._episodes = discover_local_lerobot_episode_indices(
-            self._root, self._info, allowed_episode_indices=meta_episode_indices
-        )
+        episode_lengths: dict[int, int] = {}
+        episodes_path = self._meta_dir / "episodes.jsonl"
+        if episodes_path.is_file():
+            meta_episode_indices: set[int] = set()
+            with open(episodes_path) as epf:
+                for line in epf:
+                    if not line.strip():
+                        continue
+                    obj = json.loads(line)
+                    ep_idx = int(obj.get("episode_index", 0))
+                    meta_episode_indices.add(ep_idx)
+                    for k in ("episode_length", "length", "num_frames", "num_steps"):
+                        if obj.get(k) is not None:
+                            episode_lengths[ep_idx] = int(obj[k])
+                            break
+
+            self._episodes = discover_local_lerobot_episode_indices(
+                self._root, self._info, allowed_episode_indices=meta_episode_indices
+            )
+        else:
+            self._episodes = self._load_parquet_episode_metadata(episode_lengths)
         self._episode_lengths = [
             episode_lengths.get(ep, self._infer_episode_length_from_parquet(ep))
             for ep in self._episodes
@@ -374,6 +402,94 @@ class DreamZeroLeRobotDataset(Dataset):
             raise ValueError(
                 f"video_tolerance_s must be positive, got {video_tolerance_s!r}"
             )
+
+    def _load_parquet_episode_metadata(self, episode_lengths: dict[int, int]) -> list[int]:
+        """Load LeRobot v3 episode metadata from meta/episodes/chunk-*/file-*.parquet."""
+
+        episodes_root = self._meta_dir / "episodes"
+        if not episodes_root.is_dir():
+            raise FileNotFoundError(
+                f"Neither {self._meta_dir / 'episodes.jsonl'} nor {episodes_root}/ exists."
+            )
+        import pyarrow.parquet as pq
+
+        episodes: list[int] = []
+        for meta_path in sorted(episodes_root.glob("chunk-*/file-*.parquet")):
+            schema_names = set(pq.read_schema(str(meta_path)).names)
+            wanted_cols = [
+                "episode_index",
+                "length",
+                "episode_length",
+                "num_frames",
+                "data/chunk_index",
+                "data/file_index",
+                "dataset_from_index",
+                "dataset_to_index",
+            ]
+            for source_key in self._source_video_key.values():
+                prefix = f"videos/{source_key}"
+                wanted_cols.extend(
+                    [
+                        f"{prefix}/chunk_index",
+                        f"{prefix}/file_index",
+                        f"{prefix}/from_timestamp",
+                        f"{prefix}/to_timestamp",
+                    ]
+                )
+            table = pq.read_table(
+                str(meta_path),
+                columns=[c for c in dict.fromkeys(wanted_cols) if c in schema_names],
+            )
+            for row in table.to_pylist():
+                ep_idx = int(row.get("episode_index", len(episodes)))
+                length = int(row.get("length") or row.get("episode_length") or row.get("num_frames") or 0)
+                if length <= 0:
+                    continue
+                data_chunk = int(row.get("data/chunk_index", ep_idx // self._chunks_size))
+                data_file = int(row.get("data/file_index", ep_idx))
+                data_from = row.get("dataset_from_index")
+                data_to = row.get("dataset_to_index")
+                self._episode_data_files[ep_idx] = (data_chunk, data_file)
+                if data_from is not None and data_to is not None:
+                    self._episode_data_row_bounds[ep_idx] = (int(data_from), int(data_to))
+
+                data_path = self._format_data_path(ep_idx)
+                if not data_path.is_file():
+                    logger.warning(
+                        "Skipping episode %s because data parquet is missing: %s",
+                        ep_idx,
+                        data_path,
+                    )
+                    continue
+
+                missing_video = False
+                for source_key in self._source_video_key.values():
+                    prefix = f"videos/{source_key}"
+                    v_chunk = int(row.get(f"{prefix}/chunk_index", data_chunk))
+                    v_file = int(row.get(f"{prefix}/file_index", data_file))
+                    self._episode_video_files[(ep_idx, source_key)] = (v_chunk, v_file)
+                    from_ts = row.get(f"{prefix}/from_timestamp")
+                    if from_ts is not None:
+                        self._episode_video_start_ts[(ep_idx, source_key)] = float(from_ts)
+                    video_path = self._format_video_path(ep_idx, source_key)
+                    if not video_path.is_file():
+                        logger.warning(
+                            "Skipping episode %s because video is missing: %s",
+                            ep_idx,
+                            video_path,
+                        )
+                        missing_video = True
+                        break
+                if missing_video:
+                    continue
+                episode_lengths[ep_idx] = length
+                episodes.append(ep_idx)
+
+        if not episodes:
+            raise FileNotFoundError(
+                f"No usable episodes found under {episodes_root}; check data/video paths."
+            )
+        return sorted(episodes)
 
     def _init_lerobot_or_v2_parquet(self) -> None:
         if self._use_image_parquet_tree:
@@ -508,34 +624,54 @@ class DreamZeroLeRobotDataset(Dataset):
     def _infer_episode_length_from_parquet(self, episode_index: int) -> int:
         import pyarrow.parquet as pq
 
+        bounds = self._episode_data_row_bounds.get(int(episode_index))
+        if bounds is not None:
+            return max(0, int(bounds[1]) - int(bounds[0]))
         return int(
             pq.read_metadata(str(self._get_parquet_path(episode_index))).num_rows
         )
 
-    def _get_parquet_path(self, episode_index: int) -> Path:
+    def _format_data_path(self, episode_index: int) -> Path:
         ep_chunk = int(episode_index) // self._chunks_size
+        chunk_index, file_index = self._episode_data_files.get(
+            int(episode_index), (ep_chunk, int(episode_index))
+        )
         rel = Path(
             self._data_tmpl.format(
-                episode_chunk=ep_chunk, episode_index=int(episode_index)
+                episode_chunk=ep_chunk,
+                episode_index=int(episode_index),
+                chunk_index=chunk_index,
+                file_index=file_index,
             )
         )
-        p = (self._root / rel).resolve()
+        return (self._root / rel).resolve()
+
+    def _get_parquet_path(self, episode_index: int) -> Path:
+        p = self._format_data_path(episode_index)
         if not p.is_file():
             raise FileNotFoundError(
                 f"Parquet file not found for episode {episode_index}: {p}"
             )
         return p
 
-    def _get_video_path(self, episode_index: int, video_key: str) -> Path:
+    def _format_video_path(self, episode_index: int, video_key: str) -> Path:
         ep_chunk = int(episode_index) // self._chunks_size
+        chunk_index, file_index = self._episode_video_files.get(
+            (int(episode_index), video_key), (ep_chunk, int(episode_index))
+        )
         rel = Path(
             self._video_tmpl.format(
                 episode_chunk=ep_chunk,
                 video_key=video_key,
                 episode_index=int(episode_index),
+                chunk_index=chunk_index,
+                file_index=file_index,
             )
         )
-        p = (self._root / rel).resolve()
+        return (self._root / rel).resolve()
+
+    def _get_video_path(self, episode_index: int, video_key: str) -> Path:
+        p = self._format_video_path(episode_index, video_key)
         if not p.is_file():
             raise FileNotFoundError(
                 f"Video file not found for episode {episode_index} key {video_key}: {p}"
@@ -568,6 +704,7 @@ class DreamZeroLeRobotDataset(Dataset):
             c
             for c in (
                 "observation",
+                "frame_index",
                 *self._vector_source_keys,
                 "task",
                 "task_index",
@@ -576,6 +713,10 @@ class DreamZeroLeRobotDataset(Dataset):
             if c in schema
         ]
         tbl = pq.read_table(str(p), columns=list(dict.fromkeys(cols)))
+        bounds = self._episode_data_row_bounds.get(episode_index)
+        if bounds is not None:
+            start, end = bounds
+            tbl = tbl.slice(int(start), max(0, int(end) - int(start)))
         self._pq_cache[episode_index] = tbl
         if len(self._pq_cache) > self._pq_cache_max_episodes:
             self._pq_cache.popitem(last=False)
@@ -735,9 +876,12 @@ class DreamZeroLeRobotDataset(Dataset):
             for transform_key, source_key in self._source_video_key.items():
                 video_path = self._get_video_path(episode_index, source_key)
                 fps = self._decode_fps_for_video_file(video_path)
+                start_ts = self._episode_video_start_ts.get(
+                    (int(episode_index), source_key), 0.0
+                )
                 sample[transform_key] = decode_video_frames(
                     video_path,
-                    [float(int(i)) / fps for i in video_idx.tolist()],
+                    [start_ts + float(int(i)) / fps for i in video_idx.tolist()],
                     tolerance_s=self._video_tolerance_s,
                     backend=self._video_backend,
                 )
@@ -971,6 +1115,11 @@ class DreamZeroCollator:
         tokenizer: Any,
         embodiment_tag_mapping: dict[str, int],
     ) -> dict[str, Any]:
+        from rlinf.data.datasets.dreamzero.data_transforms import (
+            format_training_prompt,
+            normalize_instruction_text,
+        )
+
         batch: dict[str, Any] = {}
         for key in features[0]:
             if key == "text":

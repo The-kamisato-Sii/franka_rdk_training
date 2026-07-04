@@ -16,12 +16,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 from einops import rearrange
 from groot.vla.model.dreamzero.transform.dreamzero_cotrain import (
     DreamTransform as DreamTransformBase,
+    HuggingfaceTokenizer,
 )
 
 
@@ -61,6 +62,30 @@ def concat_multiview_video(embodiment_tag: Any, images: Any) -> np.ndarray:
 
 class DreamTransform(DreamTransformBase):
     """DreamTransform that delegates multi-view layout to ``data_transforms`` registry."""
+
+    _TOKENIZER_CACHE: ClassVar[dict[tuple[str, int], HuggingfaceTokenizer]] = {}
+
+    def __init__(self, **kwargs):
+        # Groot's DreamTransform eagerly constructs a HuggingFace tokenizer in
+        # __init__. The real-world mixture creates one transform per task, so
+        # eager construction can reload the same tokenizer hundreds of times in
+        # every Ray worker before training even starts. Skip the eager parent
+        # initializer and lazily share one tokenizer per process if apply_batch
+        # ever needs it. Map-style SFT samples are tokenized by DreamZeroCollator.
+        super(DreamTransformBase, self).__init__(**kwargs)
+        self._tokenizer = None
+
+    @property
+    def tokenizer(self):
+        if self._tokenizer is None:
+            name = str(getattr(self, "tokenizer_path", "checkpoints/umt5-xxl"))
+            key = (name, int(self.max_length))
+            tok = self._TOKENIZER_CACHE.get(key)
+            if tok is None:
+                tok = HuggingfaceTokenizer(name=name, seq_len=self.max_length, clean="whitespace")
+                self._TOKENIZER_CACHE[key] = tok
+            self._tokenizer = tok
+        return self._tokenizer
 
     def apply_batch(self, data: dict, batch_size: int) -> dict:
         """Collate with RLinf prompt wrapping (supports all registered embodiments)."""

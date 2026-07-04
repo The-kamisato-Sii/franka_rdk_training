@@ -15,6 +15,7 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from groot.vla.data.schema import DatasetMetadata
@@ -31,10 +32,19 @@ from rlinf.data.datasets.dreamzero.data_transforms.libero_sim import (
 from rlinf.data.datasets.dreamzero.data_transforms.oxe_droid import (
     OxeDroidDataTransform,
 )
+from rlinf.data.datasets.dreamzero.data_transforms.real_world_joint import (
+    RealWorldJointDataTransform,
+)
+from rlinf.data.datasets.dreamzero.data_transforms.robotwin2 import (
+    RobotWin2DataTransform,
+)
+from rlinf.data.datasets.dreamzero.real_world_joint import REAL_WORLD_JOINT_TAGS
 
 _EMBODIMENT_REGISTRY: dict[str, type[DreamZeroEmbodimentTransform]] = {
     LiberoSimDataTransform.TAG: LiberoSimDataTransform,
     OxeDroidDataTransform.TAG: OxeDroidDataTransform,
+    RealWorldJointDataTransform.TAG: RealWorldJointDataTransform,
+    RobotWin2DataTransform.TAG: RobotWin2DataTransform,
 }
 
 DEFAULT_EMBODIMENT_TAG_MAPPING: dict[str, dict[str, int]] = {
@@ -129,6 +139,24 @@ def convert_rollout_env_obs(
     )
 
 
+def _local_dataset_metadata(blob: dict[str, Any]):
+    """DatasetMetadata-like object for tags not yet present in Groot's enum.
+
+    Keep Groot's native nested pydantic objects so upstream transforms that
+    check ``StateActionMetadata`` or call ``model_dump()`` keep working. Only
+    the outer object is lightweight, because Groot's DatasetMetadata validates
+    ``embodiment_tag`` against an enum that does not include franka dual yet.
+    """
+
+    from groot.vla.data.schema import DatasetModalities, DatasetStatistics
+
+    return SimpleNamespace(
+        statistics=DatasetStatistics.model_validate(blob.get("statistics") or {}),
+        modalities=DatasetModalities.model_validate(blob.get("modalities") or {}),
+        embodiment_tag=str(blob.get("embodiment_tag", "")),
+    )
+
+
 def collect_dreamzero_dataset_keys(
     data_transform: Any,
     embodiment_tag: str,
@@ -145,9 +173,37 @@ def collect_dreamzero_dataset_keys(
     return video_keys, state_keys, action_keys, language_keys
 
 
+def _synthetic_real_world_joint_metadata(tag: str) -> DatasetMetadata:
+    zeros64 = [0.0] * 64
+    ones64 = [1.0] * 64
+    zeros32 = [0.0] * 32
+    ones32 = [1.0] * 32
+    blob = {
+        "statistics": {
+            "state": {"joint": {"mean": zeros64, "std": ones64, "min": zeros64, "max": zeros64, "q01": [-1.0] * 64, "q99": ones64}},
+            "action": {"joint": {"mean": zeros32, "std": ones32, "min": zeros32, "max": zeros32, "q01": [-1.0] * 32, "q99": ones32}},
+        },
+        "modalities": {
+            "video": {
+                "agent_view": {"resolution": [256, 128], "channels": 3, "fps": 30},
+                "left_wrsit_view": {"resolution": [128, 128], "channels": 3, "fps": 30},
+                "right_wrist_view": {"resolution": [128, 128], "channels": 3, "fps": 30},
+            },
+            "state": {"joint": {"absolute": True, "shape": [64], "continuous": True}},
+            "action": {"joint": {"absolute": True, "shape": [32], "continuous": True}},
+        },
+        "embodiment_tag": tag,
+    }
+    if tag == "real_world_franka_dual":
+        return _local_dataset_metadata(blob)
+    return DatasetMetadata.model_validate(blob)
+
+
 def load_dreamzero_dataset_metadata(cfg: Any) -> DatasetMetadata:
     """Load :class:`DatasetMetadata` for ``embodiment_tag``."""
     tag = cfg.embodiment_tag
+    if tag in REAL_WORLD_JOINT_TAGS and not cfg.get("metadata_json_path", None):
+        return _synthetic_real_world_joint_metadata(tag)
     if cfg.get("metadata_json_path", None):
         path = Path(str(cfg["metadata_json_path"])).expanduser()
         if not path.is_file():
@@ -192,3 +248,10 @@ def build_dreamzero_composed_transform(
         cfg=cfg,
         embodiment_tag_mapping=embodiment_tag_mapping,
     )
+
+for _tag in REAL_WORLD_JOINT_TAGS:
+    _EMBODIMENT_REGISTRY.setdefault(_tag, RealWorldJointDataTransform)
+
+DEFAULT_EMBODIMENT_TAG_MAPPING.update({
+    tag: dict(RealWorldJointDataTransform.DEFAULT_TAG_MAPPING) for tag in REAL_WORLD_JOINT_TAGS
+})

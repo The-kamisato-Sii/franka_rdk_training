@@ -189,6 +189,12 @@ def _register_builtin_models():
         force=True,
     )
     register_model(
+        SupportedModel.WMAM.value,
+        _build_dreamzero,
+        category="embodied",
+        force=True,
+    )
+    register_model(
         SupportedModel.CFG_MODEL.value,
         _build_openpi_cfg,
         category="embodied",

@@ -92,6 +92,7 @@ SupportedModel.GR00T = SupportedModel.register("gr00t", force=True)
 SupportedModel.DEXBOTIC_PI = SupportedModel.register("dexbotic_pi", force=True)
 SupportedModel.DEXBOTIC_DM0 = SupportedModel.register("dexbotic_dm0", force=True)
 SupportedModel.DREAMZERO = SupportedModel.register("dreamzero", force=True)
+SupportedModel.WMAM = SupportedModel.register("wmam", force=True)
 SupportedModel.CNN_POLICY = SupportedModel.register("cnn_policy", force=True)
 SupportedModel.FLOW_POLICY = SupportedModel.register("flow_policy", force=True)
 SupportedModel.CMA_POLICY = SupportedModel.register("cma", force=True)
@@ -115,6 +116,7 @@ EMBODIED_MODEL = set(
         SupportedModel.DEXBOTIC_PI,
         SupportedModel.DEXBOTIC_DM0,
         SupportedModel.DREAMZERO,
+        SupportedModel.WMAM,
         SupportedModel.CNN_POLICY,
         SupportedModel.FLOW_POLICY,
         SupportedModel.CMA_POLICY,
@@ -1081,7 +1083,7 @@ def validate_sft_cfg(cfg: DictConfig) -> DictConfig:
         model_type = cfg.actor.model.get("model_type", None)
         if (
             model_type is not None
-            and SupportedModel(model_type) == SupportedModel.DREAMZERO
+            and SupportedModel(model_type) in (SupportedModel.DREAMZERO, SupportedModel.WMAM)
         ):
             from rlinf.models.embodiment.dreamzero.dreamzero_config import (
                 validate_dreamzero_sft_model_cfg,

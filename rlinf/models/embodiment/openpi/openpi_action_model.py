@@ -330,7 +330,20 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             self.gradient_checkpointing_disable()
         observation = data["observation"]
         actions = data["actions"]
-        return super().forward(observation, actions)
+        noise = data.get("noise", None)
+        time = data.get("time", None)
+        action_mask = data.get("action_mask", None)
+        if action_mask is not None:
+            action_mask = action_mask.to(device=actions.device, dtype=actions.dtype)
+            if action_mask.shape != actions.shape:
+                raise ValueError(
+                    f"OpenPI action_mask shape mismatch: mask={tuple(action_mask.shape)} "
+                    f"actions={tuple(actions.shape)}"
+                )
+            if noise is None:
+                noise = self.sample_noise(actions.shape, actions.device)
+            noise = noise.to(device=actions.device, dtype=actions.dtype) * action_mask
+        return super().forward(observation, actions, noise=noise, time=time)
 
     def prepare_dagger_sft_batch(self, batch):
         """Prepare replay-buffer samples for DAgger SFT updates."""

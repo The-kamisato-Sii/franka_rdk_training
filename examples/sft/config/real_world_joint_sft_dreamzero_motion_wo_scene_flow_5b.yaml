@@ -1,0 +1,187 @@
+defaults:
+  - training_backend/fsdp@actor.fsdp_config
+  - model/dreamzero_5b@actor.model
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}
+    - file://${oc.env:EMBODIED_PATH}/config
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: all
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "real_world_joint_sft_dreamzero_motion_wo_scene_flow_5b"
+    logger_backends: ["tensorboard"]
+  max_epochs: -1
+  max_steps: 300000
+  val_check_interval: -1
+  save_interval: 2000
+  log_interval: 100
+  resume_dir: null
+
+data:
+  dataset_type: real_world_joint
+  train_data_paths: ${oc.env:REAL_WORLD_DATA_ROOT,/inspire/qb-ilm2/project/robot-body/public/real_world_data_dreamzero_motion}
+  real_world_joint_root: ${data.train_data_paths}
+  num_workers: 4
+  prefetch_factor: 1
+  pin_memory: true
+  parquet_cache_size: 1
+  motion_cache_size: 0
+  video_backend: torchcodec # LeRobot video decoder: pyav | torchcodec
+  motion_downsample_ratio: 6
+  scene_flow_training: false
+  drop_motion_npy_file_cache: true
+  real_world_joint_max_tasks: null
+  real_world_joint_max_tasks_per_tag: null
+  real_world_joint_tags: null
+  real_world_joint_task_name_contains: null
+  real_world_joint_discover_log_every: 50
+  real_world_joint_fast_local_index: true
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 32
+  global_batch_size: 1024
+  seed: 42
+
+  model:
+    model_type: "dreamzero"
+    precision: bf16
+    model_path: null
+    tokenizer_path: ${oc.env:TOKENIZER_DIR,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/checkpoints/umt5-xxl}
+    diffusion_model_pretrained_path: ${oc.env:WAN22_CKPT_DIR,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/checkpoints/Wan2.2-TI2V-5B}
+    image_encoder_pretrained_path: ${oc.env:IMAGE_ENCODER_PATH,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/checkpoints/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth}
+    text_encoder_pretrained_path: ${actor.model.diffusion_model_pretrained_path}/models_t5_umt5-xxl-enc-bf16.pth
+    vae_pretrained_path: ${actor.model.diffusion_model_pretrained_path}/Wan2.2_VAE.pth
+    motion_vae_pretrained_path: ${oc.env:MOTION_VAE_CKPT_DIR,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/checkpoints/geometry_motion_vae}
+    motion_vae_base_pretrained_model_name_or_path: ${oc.env:MOTION_VAE_BASE_MODEL_DIR,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero/checkpoints/stable-diffusion-v1-5}
+    metadata_json_path: null
+
+    embodiment_tag: "allenai_real_world_joint"
+    embodiment_tag_mapping:
+      allenai_real_world_joint: 36
+      robomind2_ark_joint: 37
+      robomind2_franka_joint: 38
+      robomind2_ur_joint: 39
+      robocoin_galaxea_r1_lite: 40
+      robocoin_galaxea_r1_lite_dual: 41
+      robocoin_agilex_cobot_magic_14d: 42
+      robocoin_agilex_cobot_magic_26d: 43
+      robocoin_ruantong_a2d_17d: 44
+      robocoin_ruantong_a2d_34d: 45
+      robocoin_realman_rmc_aidal: 46
+      robocoin_yinhe: 47
+      robocoin_alpha_bot_2: 48
+
+    action_dim: 32
+    max_action_dim: 32
+    max_state_dim: 64
+    state_horizon: 1
+    action_horizon: 48
+    num_action_per_block: 48
+    target_video_height: 256
+    target_video_width: 256
+    relative_action: false
+    relative_action_per_horizon: false
+    is_lora: false
+
+    action_head_cfg:
+      config:
+        num_frames: 33
+        num_frame_per_block: 2
+        num_action_per_block: 48
+        max_action_dim: 32
+        max_state_dim: 64
+        target_video_height: 256
+        target_video_width: 256
+        action_loss_embodiment_ids: [36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]
+        use_motion_modality: true
+        motion_horizon: 8
+        motion_latent_channels: 8
+        per_motion_seqlen: 16
+        decode_motion_on_inference: false
+        return_motion_latent_only: true
+        motion_vae_cfg:
+          _target_: groot.vla.model.dreamzero.modules.motioncrafter_motion_vae.MotionCrafterMotionVAE
+          _convert_: object
+          pretrained_model_name_or_path: TencentARC/MotionCrafter
+          subfolder: geometry_motion_vae
+          pretrained_path: ${actor.model.motion_vae_pretrained_path}
+          base_vae_pretrained_model_name_or_path: ${actor.model.motion_vae_base_pretrained_model_name_or_path}
+          base_vae_subfolder: vae
+          base_vae_local_files_only: true
+          freeze_vae: true
+          motion_supervision_spatial_size: [64, 64]
+        diffusion_model_cfg:
+          frame_seqlen: 64
+          use_motion_modality: true
+          num_motion_per_block: 8
+          motion_latent_channels: 8
+          per_motion_seqlen: 16
+          motion_latent_spatial_size: [8, 8]
+          model_type: ti2v
+          in_dim: 48
+          out_dim: 48
+          dim: 3072
+          ffn_dim: 14336
+          num_heads: 24
+          num_layers: 30
+          max_chunk_size: 4
+          max_num_embodiments: 13
+          num_frame_per_block: 2
+          num_action_per_block: 48
+          num_state_per_block: 1
+          concat_first_frame_latent: false
+        vae_cfg:
+          _target_: groot.vla.model.dreamzero.modules.wan_video_vae.WanVideoVAE38
+          _convert_: object
+          z_dim: 48
+          dim: 160
+          vae_pretrained_path: ${actor.model.vae_pretrained_path}
+
+  optim:
+    lr: 5.0e-5
+    value_lr: 1.55e-4
+    adam_beta1: 0.95
+    adam_beta2: 0.999
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-5
+    clip_grad: 0.5
+    lr_scheduler: "cosine"
+    lr_warmup_steps: -1
+    lr_warmup_steps_ratio: 0.05
+    total_training_steps: 100000
+  fsdp_config:
+    strategy: "fsdp2"
+    use_orig_params: True
+    gradient_checkpointing: True
+    gradient_checkpointing_use_reentrant: True
+    limit_all_gathers: False
+    forward_prefetch: True
+    backward_prefetch: "pre"
+    reshard_after_forward: False
+    checkpoint_format: local_shard
+    save_full_model_weights: True
+    grad_scaler:
+      enabled: False
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: bf16
+      buffer_dtype: bf16
+    amp_autocast:
+      enabled: False
+      precision: "bf16"

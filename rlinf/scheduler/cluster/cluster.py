@@ -426,13 +426,20 @@ class Cluster:
             if self._distributed_log_collector is not None:
                 self._distributed_log_collector.stop()
 
-            with without_http_proxies():
-                alive_actors = list_actors(
-                    filters=[
-                        ("STATE", "=", "ALIVE"),
-                        ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
-                    ]
+            try:
+                with without_http_proxies():
+                    alive_actors = list_actors(
+                        filters=[
+                            ("STATE", "=", "ALIVE"),
+                            ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
+                        ]
+                    )
+            except Exception as exc:
+                self._logger.warning(
+                    "Skipping Ray actor cleanup because Ray state API is unavailable: %s",
+                    exc,
                 )
+                alive_actors = []
             for actor_state in alive_actors:
                 actor = ray.get_actor(actor_state.name)
                 ray.kill(actor, no_restart=True)

@@ -19,13 +19,53 @@ import torch
 from omegaconf import DictConfig
 
 
+def _resolve_target_dtype(cfg: DictConfig, torch_dtype=None):
+    if torch_dtype is not None:
+        return torch_dtype
+    precision = getattr(cfg, "precision", None)
+    if precision is None:
+        return None
+    precision = str(precision).lower()
+    if precision in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if precision in ("fp16", "float16", "half"):
+        return torch.float16
+    if precision in ("fp32", "float32", "float"):
+        return torch.float32
+    return None
+
+
+def _cast_floating_tensors(module: torch.nn.Module, dtype: torch.dtype) -> None:
+    for param in module.parameters():
+        if param.is_floating_point() and param.dtype != dtype:
+            param.data = param.data.to(dtype=dtype)
+    for buffer in module.buffers():
+        if buffer.is_floating_point() and buffer.dtype != dtype:
+            buffer.data = buffer.data.to(dtype=dtype)
+
+
+def _norm_stats_to_float32(norm_stats):
+    import numpy as np
+    from openpi.shared.normalize import NormStats
+
+    return {
+        key: NormStats(
+            mean=np.asarray(value.mean, dtype=np.float32),
+            std=np.asarray(value.std, dtype=np.float32),
+            q01=None if value.q01 is None else np.asarray(value.q01, dtype=np.float32),
+            q99=None if value.q99 is None else np.asarray(value.q99, dtype=np.float32),
+        )
+        for key, value in norm_stats.items()
+    }
+
+
 def get_model(cfg: DictConfig, torch_dtype=None):
     import glob
 
     import openpi.shared.download as download
+    import openpi.shared.normalize as normalize
     import openpi.transforms as transforms
     import safetensors
-    from openpi.training import checkpoints as _checkpoints
 
     from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
     from rlinf.models.embodiment.openpi.openpi_action_model import (
@@ -87,6 +127,9 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         model.load_state_dict(all_state_dict, strict=False)
 
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+    target_dtype = _resolve_target_dtype(cfg, torch_dtype)
+    if target_dtype is not None:
+        _cast_floating_tensors(model, target_dtype)
     # fsdp replace
     # model.paligemma_with_expert.replace_gemma_decoder_layers()
     # load data stats
@@ -97,9 +140,17 @@ def get_model(cfg: DictConfig, torch_dtype=None):
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
         # that the policy is using the same normalization stats as the original training process.
-        if data_config.asset_id is None:
-            raise ValueError("Asset id is required to load norm stats.")
-        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir, data_config.asset_id)
+        norm_stats_dir = getattr(cfg.openpi, "norm_stats_dir", None)
+        norm_stats_key = getattr(cfg.openpi, "norm_stats_key", None) or data_config.asset_id
+        if norm_stats_dir:
+            norm_stats_path = str(norm_stats_dir)
+        else:
+            if norm_stats_key is None:
+                raise ValueError("Asset id is required to load norm stats.")
+            norm_stats_path = os.path.join(checkpoint_dir, norm_stats_key)
+        norm_stats = _norm_stats_to_float32(
+            normalize.load(norm_stats_path)
+        )
     # wrappers
     repack_transforms = transforms.Group()
     default_prompt = None

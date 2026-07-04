@@ -16,8 +16,6 @@ Request:
 
 ```python
 {
-    "state": np.ndarray,   # raw [16], compatibility/debug field
-    "images": {...},       # raw compatibility/debug field
     "openpi": {
         "state": np.ndarray,      # [32] q01/q99 normalized and padded
         "state_mask": np.ndarray, # [32] bool
@@ -37,12 +35,15 @@ Request:
 The strict path uses the client-preprocessed `payload["openpi"]` block. The
 server does not redo q01/q99 state normalization or image resize/pad on this
 path; it only tokenizes the prompt, builds an OpenPI `Observation`, and calls
-`sample_actions(...)`. The raw top-level `state/images` remain for old server
-compatibility.
+`sample_actions(...)`. It returns the normalized model-space action directly;
+`openpi_pi05_client` owns the q01/q99 action inverse before publishing robot
+commands.
 
-The old raw fallback can be forced with `--ignore-client-preprocessed-payload`,
-but it is not the strict Franka-dual comparison path unless that server also
-reproduces the same q01/q99 state normalization and action inverse.
+By default, the server now fails if `payload["openpi"]` is missing, because
+training-matched deployment keeps normalization and image preprocessing inside
+`franka_rdk/lerobot/src/lerobot/policies/openpi_client/processor_openpi_client.py`.
+There is no raw top-level `state/images` fallback in `/infer`; if a client does
+not send the `payload["openpi"]` block, the request is rejected immediately.
 
 Response:
 
@@ -87,7 +88,7 @@ base model:
   /inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/pi05_base_pytorch_real_world_joint
 
 SFT checkpoint:
-  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/real_world_franka_dual_openpi_pi05_sft/checkpoints/global_step_20000
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/real_world_franka_dual_openpi_pi05_sft_v2/checkpoints/global_step_10000
 
 server:
   0.0.0.0:8000
@@ -117,6 +118,21 @@ bash deploy/open_pi/run_franka_dual_openpi_server.sh
 `CHECKPOINT_PATH` can be either the `global_step_xxxxx` directory or a direct
 `checkpoint_rank_0.pt` file.
 
+Before `global_step_10000` exists, the current v2 checkpoint can be served with:
+
+```bash
+CHECKPOINT_PATH=/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/real_world_franka_dual_openpi_pi05_sft_v2/checkpoints/global_step_8000 \
+bash deploy/open_pi/run_franka_dual_openpi_server.sh
+```
+
+The server does not normalize raw state and does not inverse-normalize actions.
+The `franka_rdk` OpenPI client must use the same v2 dataset stats used in SFT
+for client-side state normalization and action inverse normalization:
+
+```text
+/inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test/norm_stats.json
+```
+
 ## Smoke Test
 
 After the server is up:
@@ -145,6 +161,6 @@ On the `franka_rdk` machine, point its OpenPI client at this server:
 ```
 
 `openpi_pi05_client` already sets `n_action_steps=48`,
-`execute_full_action_chunk=true`, `image_payload_format=raw_hwc`, and
-`server_returns_normalized_actions=true`. It also sends the `payload["openpi"]`
-block consumed by this server.
+`execute_full_action_chunk=true`, `include_preprocessed_payload=true`,
+`send_raw_compat_payload=false`, and `server_returns_normalized_actions=true`.
+It sends the `payload["openpi"]` block consumed by this server.

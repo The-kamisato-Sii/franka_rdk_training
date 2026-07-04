@@ -177,8 +177,26 @@ class FSDPStrategyBase(ABC):
             obj = obj.cpu()
         else:
             raise ValueError("value type error")
-        torch.save(obj, path, _use_new_zipfile_serialization=True)
+        cls._atomic_torch_save(obj, path, _use_new_zipfile_serialization=True)
         print(f"Save using _use_new_zipfile_serialization to {path}")
+
+    @classmethod
+    def _atomic_torch_save(cls, obj, path: str, **kwargs) -> None:
+        save_dir = os.path.dirname(path)
+        os.makedirs(save_dir, exist_ok=True)
+        tmp_path = os.path.join(
+            save_dir, f".{os.path.basename(path)}.tmp.{os.getpid()}"
+        )
+        try:
+            torch.save(obj, tmp_path, **kwargs)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def save_checkpoint(
@@ -225,7 +243,7 @@ class FSDPStrategyBase(ABC):
                 )
                 rank = torch.distributed.get_rank()
                 os.makedirs(local_shard_save_path, exist_ok=True)
-                torch.save(
+                cls._atomic_torch_save(
                     training_state.state_dict(),
                     os.path.join(local_shard_save_path, f"checkpoint_rank_{rank}.pt"),
                 )
@@ -253,16 +271,13 @@ class FSDPStrategyBase(ABC):
             model_state_dict = get_model_state_dict(model=model, options=opts)
             if torch.distributed.get_rank() == 0:
                 os.makedirs(sd_save_path, exist_ok=True)
+                sd_file_path = os.path.join(sd_save_path, "full_weights.pt")
                 # npu requires a specific model parameter save
                 if Worker.torch_device_type == "npu":
-                    cls.save_npu_weight(
-                        model_state_dict, os.path.join(sd_save_path, "full_weights.pt")
-                    )
+                    cls.save_npu_weight(model_state_dict, sd_file_path)
 
                 else:
-                    torch.save(
-                        model_state_dict, os.path.join(sd_save_path, "full_weights.pt")
-                    )
+                    cls._atomic_torch_save(model_state_dict, sd_file_path)
 
             torch.distributed.barrier()
 
@@ -386,9 +401,14 @@ class FSDPStrategyBase(ABC):
         model_state_dict,
         cpu_offload: bool,
         full_state_dict: bool,
+        strict: bool = True,
+        broadcast_from_rank0: bool = False,
     ):
         opts = StateDictOptions(
-            cpu_offload=cpu_offload, full_state_dict=full_state_dict
+            cpu_offload=cpu_offload,
+            full_state_dict=full_state_dict,
+            strict=strict,
+            broadcast_from_rank0=broadcast_from_rank0,
         )
         set_model_state_dict(
             model=model,

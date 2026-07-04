@@ -14,6 +14,7 @@ Current request payload shape:
         "images": {...},                         # raw compatibility field
         "openpi": {
             "state": np.ndarray[32],             # q01/q99 normalized + padded
+            "state_mask": np.ndarray[32],        # true entries are real state dims
             "images": {
                 "base_0_rgb": np.ndarray[3,224,224] float32 in [-1,1],
                 "left_wrist_0_rgb": np.ndarray[3,224,224] float32 in [-1,1],
@@ -43,10 +44,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import dataclasses
+import json
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -66,18 +68,11 @@ DEFAULT_BASE_MODEL = (
 )
 DEFAULT_CKPT = Path(
     "/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/"
-    "real_world_franka_dual_openpi_pi05_sft/checkpoints/global_step_20000"
+    "real_world_franka_dual_openpi_pi05_sft_v2/checkpoints/global_step_10000"
 )
 
-RAW_HWC_IMAGE_FORMAT = "raw_hwc"
-LEGACY_224_CHW_IMAGE_FORMAT = "legacy_224_chw"
 OPENPI_CLIENT_PREPROCESSED_FORMAT = "openpi_pi05_client_preprocessed_v1"
 OPENPI_IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-SUPPORTED_IMAGE_FORMATS = {
-    RAW_HWC_IMAGE_FORMAT,
-    LEGACY_224_CHW_IMAGE_FORMAT,
-    "auto",
-}
 
 
 def _pack_array(obj: Any):
@@ -115,47 +110,6 @@ def unpackb(data: bytes) -> Any:
     return msgpack.unpackb(data, object_hook=_unpack_array, raw=False)
 
 
-def _squeezed_image_shape(image: Any) -> tuple[int, ...]:
-    arr = np.asarray(image)
-    arr = np.squeeze(arr)
-    if arr.ndim == 4 and arr.shape[0] == 1:
-        arr = arr[0]
-    return tuple(int(x) for x in arr.shape)
-
-
-def _looks_like_legacy_224_chw(image: Any) -> bool:
-    shape = _squeezed_image_shape(image)
-    return len(shape) == 3 and shape[0] in (1, 3, 4) and shape[1:] == (224, 224)
-
-
-def _infer_image_payload_format(*images: Any) -> str:
-    if any(_looks_like_legacy_224_chw(image) for image in images):
-        return LEGACY_224_CHW_IMAGE_FORMAT
-    return RAW_HWC_IMAGE_FORMAT
-
-
-def _as_hwc_uint8(image: Any) -> np.ndarray:
-    arr = np.asarray(image)
-    arr = np.squeeze(arr)
-    if arr.ndim == 4:
-        arr = arr[0]
-    if arr.ndim != 3:
-        raise ValueError(f"Expected image with 3 dims, got shape={arr.shape}")
-    if arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
-        arr = np.transpose(arr, (1, 2, 0))
-    if arr.shape[-1] == 4:
-        arr = arr[..., :3]
-    if arr.shape[-1] != 3:
-        raise ValueError(f"Expected RGB image with 3 channels, got shape={arr.shape}")
-    if arr.dtype != np.uint8:
-        arr_f = arr.astype(np.float32, copy=False)
-        if arr_f.size and float(np.nanmax(arr_f)) <= 1.0 + 1e-3:
-            arr = np.clip(arr_f * 255.0, 0, 255).astype(np.uint8)
-        else:
-            arr = np.clip(arr_f, 0, 255).astype(np.uint8)
-    return np.ascontiguousarray(arr)
-
-
 def _as_chw_float_minus_one_one(image: Any) -> np.ndarray:
     arr = np.asarray(image)
     arr = np.squeeze(arr)
@@ -187,12 +141,52 @@ def _as_chw_float_minus_one_one(image: Any) -> np.ndarray:
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
+def _chw_minus_one_one_to_hwc_uint8(image: Any) -> np.ndarray:
+    arr = _as_chw_float_minus_one_one(image)
+    arr = np.transpose(arr, (1, 2, 0))
+    arr = np.clip((arr + 1.0) * 0.5 * 255.0, 0, 255)
+    return np.ascontiguousarray(np.rint(arr).astype(np.uint8))
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(sub_value) for sub_value in value]
+    return value
+
+
 def _pad_or_trim_vector(values: Any, dim: int) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float32).reshape(-1)
     out = np.zeros((int(dim),), dtype=np.float32)
     n = min(arr.shape[0], int(dim))
     out[:n] = arr[:n]
     return np.ascontiguousarray(out)
+
+
+def _unpadded_preprocessed_state(openpi: dict[str, Any]) -> np.ndarray:
+    state_payload = np.asarray(openpi.get("state"), dtype=np.float32).reshape(-1)
+    if state_payload.size == 0:
+        raise ValueError("payload[openpi][state] must contain normalized state values")
+
+    mask_payload = openpi.get("state_mask")
+    if mask_payload is None:
+        raise ValueError("payload[openpi][state_mask] is required for padded OpenPI state")
+    state_mask = np.asarray(mask_payload, dtype=bool).reshape(-1)
+    if state_mask.shape != state_payload.shape:
+        raise ValueError(
+            "payload[openpi][state_mask] shape must match payload[openpi][state]: "
+            f"{state_mask.shape} vs {state_payload.shape}"
+        )
+    if not bool(np.any(state_mask)):
+        raise ValueError("payload[openpi][state_mask] must contain at least one true entry")
+    return np.ascontiguousarray(state_payload[state_mask], dtype=np.float32)
 
 
 def _torchify_tree(value: Any) -> Any:
@@ -204,6 +198,20 @@ def _torchify_tree(value: Any) -> Any:
         return {key: _torchify_tree(sub_value) for key, sub_value in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(_torchify_tree(sub_value) for sub_value in value)
+    return value
+
+
+def _cast_floating_tree(value: Any, dtype: torch.dtype) -> Any:
+    if torch.is_tensor(value):
+        if value.is_floating_point():
+            return value.to(dtype=dtype)
+        return value
+    if isinstance(value, dict):
+        return {key: _cast_floating_tree(sub_value, dtype) for key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [_cast_floating_tree(sub_value, dtype) for sub_value in value]
+    if isinstance(value, tuple):
+        return tuple(_cast_floating_tree(sub_value, dtype) for sub_value in value)
     return value
 
 
@@ -220,156 +228,6 @@ def _openpi_preprocessed_payload(payload: dict) -> dict[str, Any] | None:
             f"expected {OPENPI_CLIENT_PREPROCESSED_FORMAT!r}"
         )
     return openpi
-
-
-def _resize_exact(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    pil = Image.fromarray(_as_hwc_uint8(image))
-    return np.asarray(pil.resize((width, height), resample=Image.Resampling.BILINEAR))
-
-
-@dataclasses.dataclass(frozen=True)
-class CameraImages:
-    middle_zed: np.ndarray
-    left_camera: np.ndarray
-    right_camera: np.ndarray
-    stitched: np.ndarray
-    payload_format: str
-
-
-def _get_nested(payload: dict, *keys: str, default: Any = None) -> Any:
-    for key in keys:
-        if key in payload:
-            return payload[key]
-    return default
-
-
-def _declared_image_payload_format(payload: dict) -> str | None:
-    declared = _get_nested(
-        payload,
-        "image_payload_format",
-        "image_format",
-        "images_format",
-        default=None,
-    )
-    if declared is None:
-        return None
-    declared_format = str(declared)
-    if declared_format not in SUPPORTED_IMAGE_FORMATS - {"auto"}:
-        raise ValueError(
-            f"Unsupported image_payload_format={declared_format!r}; expected "
-            f"{RAW_HWC_IMAGE_FORMAT!r} or {LEGACY_224_CHW_IMAGE_FORMAT!r}"
-        )
-    return declared_format
-
-
-def preprocess_images(
-    payload: dict,
-    *,
-    expected_format: str = RAW_HWC_IMAGE_FORMAT,
-    allow_legacy_224_chw: bool = False,
-) -> CameraImages:
-    if expected_format not in SUPPORTED_IMAGE_FORMATS:
-        raise ValueError(f"Unsupported server image payload format: {expected_format}")
-
-    images = payload.get("images", {})
-    if not isinstance(images, dict):
-        raise ValueError("payload['images'] must be a dict")
-
-    middle = _get_nested(
-        images,
-        "middle_zed",
-        "image",
-        "base_0_rgb",
-        "observation.images.middle_zed",
-        default=None,
-    )
-    left = _get_nested(
-        images,
-        "left_camera",
-        "left_wrist_image",
-        "left_wrist_0_rgb",
-        "observation.images.left_camera",
-        default=None,
-    )
-    right = _get_nested(
-        images,
-        "right_camera",
-        "right_wrist_image",
-        "right_wrist_0_rgb",
-        "observation.images.right_camera",
-        default=None,
-    )
-    if middle is None or left is None or right is None:
-        raise ValueError(
-            "Missing required images. Expected middle_zed, left_camera, right_camera"
-        )
-
-    inferred_format = _infer_image_payload_format(middle, left, right)
-    declared_format = _declared_image_payload_format(payload)
-    if declared_format is not None and declared_format != inferred_format:
-        raise ValueError(
-            f"Declared image_payload_format {declared_format!r} does not match "
-            f"image shapes inferred as {inferred_format!r}. Shapes: "
-            f"middle={_squeezed_image_shape(middle)}, "
-            f"left={_squeezed_image_shape(left)}, right={_squeezed_image_shape(right)}"
-        )
-
-    payload_format = declared_format or inferred_format
-    if expected_format != "auto" and payload_format != expected_format:
-        if not (payload_format == LEGACY_224_CHW_IMAGE_FORMAT and allow_legacy_224_chw):
-            raise ValueError(
-                f"Received image payload format {payload_format!r}, but server "
-                f"expects {expected_format!r}. Use policy.type=openpi_pi05_client "
-                f"or set --policy.image_payload_format={RAW_HWC_IMAGE_FORMAT} on "
-                "the robot client. To run the legacy path intentionally, restart "
-                "this server with --allow-legacy-224-chw."
-            )
-    if payload_format == LEGACY_224_CHW_IMAGE_FORMAT and not allow_legacy_224_chw:
-        raise ValueError(
-            "Received legacy_224_chw images. This is the old client-side 224x224 "
-            "resize/CHW transport and is not the training-matched OpenPI pi0.5 "
-            "wire format. Use policy.type=openpi_pi05_client or set "
-            "--policy.image_payload_format=raw_hwc on the robot client. To run "
-            "the legacy path intentionally, restart this server with "
-            "--allow-legacy-224-chw."
-        )
-
-    middle_hwc = _as_hwc_uint8(middle)
-    left_hwc = _as_hwc_uint8(left)
-    right_hwc = _as_hwc_uint8(right)
-
-    # Optional/debug Franka deployment layout:
-    # top: middle ZED 128x256; bottom: left/right wrist cameras 128x128 each.
-    # The default model path below does not use this stitched image, because
-    # RLinf training feeds OpenPI three separate views and lets OpenPI's model
-    # transforms do their own resize/pad.
-    middle_128x256 = _resize_exact(middle_hwc, 128, 256)
-    left_128x128 = _resize_exact(left_hwc, 128, 128)
-    right_128x128 = _resize_exact(right_hwc, 128, 128)
-    wrist_row = np.concatenate([left_128x128, right_128x128], axis=1)
-    stitched = np.concatenate([middle_128x256, wrist_row], axis=0)
-    return CameraImages(
-        middle_zed=middle_hwc,
-        left_camera=left_hwc,
-        right_camera=right_hwc,
-        stitched=np.ascontiguousarray(stitched),
-        payload_format=payload_format,
-    )
-
-def preprocess_state(payload: dict, action_dim: int = 16) -> np.ndarray:
-    state = _get_nested(payload, "state", "observation.state", default=None)
-    if state is None and "observation" in payload and isinstance(payload["observation"], dict):
-        obs = payload["observation"]
-        left = [obs.get(f"left_joint_positions_{i}", 0.0) for i in range(8)]
-        right = [obs.get(f"right_joint_positions_{i}", 0.0) for i in range(8)]
-        state = np.asarray(left + right, dtype=np.float32)
-    if state is None:
-        raise ValueError("Missing state. Expected payload['state'] with 16 values")
-    arr = np.asarray(state, dtype=np.float32).reshape(-1)
-    if arr.shape[0] < action_dim:
-        arr = np.pad(arr, (0, action_dim - arr.shape[0]))
-    return np.ascontiguousarray(arr[:action_dim], dtype=np.float32)
-
 
 def resolve_checkpoint_file(path: Path, rank: int) -> Path:
     path = Path(path)
@@ -395,11 +253,18 @@ class OpenPIFrankaDualRunner:
         self.device = torch.device(args.device)
         self.n_action_steps = int(args.n_action_steps)
         self.action_dim = int(args.return_action_dim)
-        self.feed_stitched_as_base = bool(args.feed_stitched_as_base)
-        self.image_payload_format = str(args.image_payload_format)
-        self.allow_legacy_224_chw = bool(args.allow_legacy_224_chw)
-        self.use_client_preprocessed_payload = bool(args.use_client_preprocessed_payload)
-        self._warned_legacy_image_payload = False
+        self.log_input_output = bool(args.log_input_output)
+        self.log_dir: Path | None = None
+        self._log_request_index = 0
+        if self.log_input_output:
+            self.log_dir = (
+                Path(__file__).resolve().parent
+                / "log"
+                / f"openpi_{time.strftime('%Y%m%d_%H%M%S')}"
+            )
+            (self.log_dir / "input").mkdir(parents=True, exist_ok=True)
+            (self.log_dir / "output").mkdir(parents=True, exist_ok=True)
+            print(f"[open_pi] input/output logging enabled: {self.log_dir}", flush=True)
 
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -418,13 +283,22 @@ class OpenPIFrankaDualRunner:
                 "precision": self.args.precision,
                 "openpi": {
                     "config_name": "pi05_real_world_joint",
+                    # get_model requires a stats key to initialize OpenPI
+                    # wrappers, but this server bypasses input_transform and
+                    # output_transform on the strict preprocessed path.
                     "repo_id": "real_world_franka_dual",
-                    "norm_stats_key": "real_world_joint",
+                    "norm_stats_key": "real_world_franka_dual",
                     "detach_critic_input": True,
                     "num_images_in_input": 3,
                     "train_expert_only": True,
                     "action_chunk": 48,
+                    "num_steps": int(self.args.num_steps),
+                    "noise_method": str(self.args.noise_method),
+                    "noise_level": float(self.args.noise_level),
                     "action_env_dim": 32,
+                    "add_value_head": False,
+                    "value_after_vlm": False,
+                    "value_vlm_mode": "mean_token",
                 },
             }
         )
@@ -492,67 +366,110 @@ class OpenPIFrankaDualRunner:
             for key in OPENPI_IMAGE_KEYS
         }
         state_dim = int(getattr(self.model.config, "action_dim", 32))
-        state = _pad_or_trim_vector(openpi.get("state"), state_dim)[None]
+        token_state = _unpadded_preprocessed_state(openpi)
+        model_state = _pad_or_trim_vector(token_state, state_dim)[None]
         processed = {
             "image": image,
             "image_mask": image_mask,
-            "state": state,
+            "state": token_state,
             "prompt": prompt,
         }
         processed = self._tokenize_preprocessed_prompt(processed)
+        # Training applies TokenizePrompt before PadStatesAndActions. Keep the
+        # tokenizer state unpadded, then provide the padded state tensor to the
+        # action expert to match the OpenPI pi0.5 SFT input transform exactly.
+        processed["state"] = model_state
+        for key in ("tokenized_prompt", "tokenized_prompt_mask", "token_ar_mask", "token_loss_mask"):
+            value = processed.get(key)
+            if value is not None and getattr(value, "ndim", None) == 1:
+                processed[key] = value[None]
         processed = _torchify_tree(processed)
         processed = self.model.precision_processor(processed)
+        processed = _cast_floating_tree(processed, self._torch_dtype())
         return _model.Observation.from_dict(processed)
+
+    def log_request_response(self, payload: dict, actions: np.ndarray) -> None:
+        if self.log_dir is None:
+            return
+
+        request_index = self._log_request_index
+        self._log_request_index += 1
+        prefix = f"{request_index:06d}"
+
+        openpi = _openpi_preprocessed_payload(payload)
+        if openpi is None:
+            return
+
+        input_dir = self.log_dir / "input"
+        output_dir = self.log_dir / "output"
+        images_payload = openpi.get("images") or {}
+        for key in OPENPI_IMAGE_KEYS:
+            if key not in images_payload:
+                continue
+            image = _chw_minus_one_one_to_hwc_uint8(images_payload[key])
+            Image.fromarray(image).save(input_dir / f"{prefix}_{key}.png")
+
+        prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
+        prompt_record = {
+            "request_index": request_index,
+            "prompt": prompt,
+            "task": payload.get("task"),
+            "model_type": payload.get("model_type"),
+            "stats_task_id": payload.get("stats_task_id"),
+            "openpi_format": openpi.get("format"),
+            "openpi_task_id": openpi.get("task_id"),
+            "stats_source": openpi.get("stats_source"),
+            "stats_file": openpi.get("stats_file"),
+            "image_format": openpi.get("image_format"),
+            "image_transport": openpi.get("image_transport"),
+            "image_mask": openpi.get("image_mask"),
+            "state_shape": tuple(np.asarray(openpi.get("state")).shape),
+            "state_mask": openpi.get("state_mask"),
+            "action_shape": tuple(np.asarray(actions).shape),
+        }
+        with (input_dir / f"{prefix}_prompt.json").open("w", encoding="utf-8") as f:
+            json.dump(_json_safe(prompt_record), f, ensure_ascii=False, indent=2)
+
+        if "state" in openpi:
+            np.save(input_dir / f"{prefix}_state_normalized.npy", np.asarray(openpi["state"], dtype=np.float32))
+        np.save(output_dir / f"{prefix}_normalized_actions.npy", np.asarray(actions, dtype=np.float32))
+
+
+    def _masked_initial_noise(self, observation) -> torch.Tensor:
+        batch_size = int(observation.state.shape[0])
+        action_horizon = int(getattr(self.model.config, "action_horizon", self.n_action_steps))
+        model_action_dim = int(getattr(self.model.config, "action_dim", 32))
+        real_action_dim = max(0, min(int(self.action_dim), model_action_dim))
+        noise = torch.randn(
+            (batch_size, action_horizon, model_action_dim),
+            device=observation.state.device,
+            dtype=torch.float32,
+        )
+        if real_action_dim < model_action_dim:
+            noise[..., real_action_dim:] = 0.0
+        return noise
 
     @torch.inference_mode()
     def infer(self, payload: dict) -> np.ndarray:
         prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
-        observation = None
-        if self.use_client_preprocessed_payload:
-            observation = self._observation_from_client_preprocessed(payload, prompt)
-
+        observation = self._observation_from_client_preprocessed(payload, prompt)
         if observation is None:
-            state = preprocess_state(payload, action_dim=16)
-            images = preprocess_images(
-                payload,
-                expected_format=self.image_payload_format,
-                allow_legacy_224_chw=self.allow_legacy_224_chw,
+            raise ValueError(
+                "Missing payload['openpi'] preprocessed block. The Franka-dual "
+                "OpenPI server requires client-side q01/q99 state normalization "
+                "and image preprocessing from openpi_pi05_client."
             )
-            if (
-                images.payload_format == LEGACY_224_CHW_IMAGE_FORMAT
-                and not self._warned_legacy_image_payload
-            ):
-                print(
-                    "[open_pi] WARNING: serving legacy_224_chw images. This is a "
-                    "compatibility path; raw_hwc matches OpenPI pi0.5 training better.",
-                    flush=True,
-                )
-                self._warned_legacy_image_payload = True
 
-            base_image = images.stitched if self.feed_stitched_as_base else images.middle_zed
-            raw_obs = {
-                "observation/image": base_image[None],
-                "observation/left_wrist_image": images.left_camera[None],
-                "observation/right_wrist_image": images.right_camera[None],
-                "observation/image_mask": np.asarray([True]),
-                "observation/left_wrist_image_mask": np.asarray([True]),
-                "observation/right_wrist_image_mask": np.asarray([True]),
-                "observation/state": state[None],
-                "prompt": [prompt],
-            }
-
-            processed = self.model.input_transform(raw_obs, transpose=False)
-            processed = self.model.precision_processor(processed)
-
-            from openpi.models import model as _model
-
-            observation = _model.Observation.from_dict(processed)
-
+        noise = self._masked_initial_noise(observation)
         outputs = self.model.sample_actions(
             observation,
+            noise=noise,
             mode="eval",
             compute_values=False,
         )
+        # sample_actions returns the normalized model-space action. Do not call
+        # model.output_transform here: RLinf's output transform includes
+        # q01/q99 Unnormalize, and the robot client owns that inverse step.
         actions_np = outputs["actions"][0].detach().float().cpu().numpy()
         return np.ascontiguousarray(
             actions_np[: self.n_action_steps, : self.action_dim],
@@ -570,21 +487,30 @@ def build_app(runner: OpenPIFrankaDualRunner) -> FastAPI:
             "device": str(runner.device),
             "n_action_steps": runner.n_action_steps,
             "return_action_dim": runner.action_dim,
-            "feed_stitched_as_base": runner.feed_stitched_as_base,
-            "image_payload_format": runner.image_payload_format,
-            "allow_legacy_224_chw": runner.allow_legacy_224_chw,
-            "use_client_preprocessed_payload": runner.use_client_preprocessed_payload,
+            "num_steps": int(runner.model.config.num_steps),
+            "noise_method": str(runner.model.config.noise_method),
+            "noise_level": float(runner.model.config.noise_level),
+            "requires_openpi_preprocessed_payload": True,
             "returns_normalized_actions": True,
+            "log_input_output": runner.log_input_output,
+            "log_dir": None if runner.log_dir is None else str(runner.log_dir),
         }
 
     @app.post("/infer")
     async def infer(request: Request) -> Response:
         started = time.perf_counter()
+        request_body = await request.body()
         try:
-            payload = unpackb(await request.body())
+            print(f"[open_pi] /infer request_bytes={len(request_body)}", flush=True)
+            payload = unpackb(request_body)
             if not isinstance(payload, dict):
                 raise ValueError(f"request payload must be a dict, got {type(payload)}")
+            print(f"[open_pi] /infer payload_keys={sorted(payload.keys())}", flush=True)
             actions = runner.infer(payload)
+            try:
+                runner.log_request_response(payload, actions)
+            except Exception as log_exc:
+                print(f"[open_pi] WARNING failed to log input/output: {log_exc}", flush=True)
             body = packb({"actions": actions})
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             headers = {"X-Inference-Time-Ms": f"{elapsed_ms:.2f}"}
@@ -594,6 +520,11 @@ def build_app(runner: OpenPIFrankaDualRunner) -> FastAPI:
                 headers=headers,
             )
         except Exception as exc:
+            print(
+                f"[open_pi] /infer failed after {(time.perf_counter() - started) * 1000.0:.2f} ms: {exc}",
+                flush=True,
+            )
+            traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return app
@@ -604,47 +535,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--precision", default="bfloat16")
+    parser.add_argument("--precision", default="float32")
     parser.add_argument("--base-model-path", type=Path, default=DEFAULT_BASE_MODEL)
     parser.add_argument("--checkpoint-path", type=Path, default=DEFAULT_CKPT)
     parser.add_argument("--checkpoint-rank", type=int, default=0)
     parser.add_argument("--n-action-steps", type=int, default=48)
     parser.add_argument("--return-action-dim", type=int, default=16)
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=5,
+        help="OpenPI flow/diffusion denoising steps. 5 matches the RLinf pi0.5 SFT training config.",
+    )
+    parser.add_argument(
+        "--noise-method",
+        default="flow_sde",
+        choices=("flow_ode", "flow_sde", "flow_noise", "flow_cps"),
+        help="OpenPI sampling method. flow_sde matches the RLinf pi0.5 SFT training config.",
+    )
+    parser.add_argument(
+        "--noise-level",
+        type=float,
+        default=0.5,
+        help="OpenPI flow_sde sampling noise level. 0.5 matches the RLinf pi0.5 SFT training config.",
+    )
     parser.add_argument("--default-prompt", default="")
     parser.add_argument(
-        "--image-payload-format",
-        choices=sorted(SUPPORTED_IMAGE_FORMATS),
-        default=RAW_HWC_IMAGE_FORMAT,
-        help=(
-            "Expected image transport. raw_hwc matches RLinf OpenPI pi0.5 "
-            "training; legacy_224_chw is only for old franka_rdk clients."
-        ),
-    )
-    parser.add_argument(
-        "--allow-legacy-224-chw",
+        "--log-input-output",
         action="store_true",
         help=(
-            "Allow old client-side 224x224 CHW image payloads. Prefer raw_hwc "
-            "for training-matched pi0.5 deployment."
-        ),
-    )
-    parser.add_argument(
-        "--ignore-client-preprocessed-payload",
-        dest="use_client_preprocessed_payload",
-        action="store_false",
-        help=(
-            "Ignore payload[openpi] and use the old raw image/state path. "
-            "The default uses client-side q01/q99 state normalization and "
-            "224x224 CHW image preprocessing from openpi_pi05_client."
-        ),
-    )
-    parser.set_defaults(use_client_preprocessed_payload=True)
-    parser.add_argument(
-        "--feed-stitched-as-base",
-        action="store_true",
-        help=(
-            "Use the 256x256 stitched image as observation/image. By default the "
-            "model receives the three views separately, matching RLinf training."
+            "Save each request's OpenPI input images/prompt and returned normalized "
+            "actions under deploy/open_pi/log/openpi_<timestamp>."
         ),
     )
     return parser.parse_args()

@@ -13,11 +13,11 @@
 # limitations under the License.
 
 import torch
+import torch.utils.checkpoint
 from groot.vla.model.dreamzero.modules.wan2_1_submodule import sinusoidal_embedding_1d
 
-# This patch is a minimal modification to DreamZero's CausalWanModel._forward_train
-# to disable gradient checkpointing when the micro batch size is greater than 1
-# (due to a PyTorch bug in this scenario). Registered in get_model.
+# This patch is DreamZero CausalWanModel._forward_train with RLinf checkpointing
+# behavior preserved, plus DreamZero's real-world motion token path.
 
 
 def _forward_train(
@@ -34,6 +34,9 @@ def _forward_train(
     action=None,
     state=None,
     embodiment_id=None,
+    motion=None,
+    timestep_motion=None,
+    motion_condition=None,
 ):
     if self.model_type == "i2v":
         assert clip_feature is not None and y is not None
@@ -54,32 +57,122 @@ def _forward_train(
     B = x.shape[0]
     F = timestep.shape[1]
 
-    if action is not None:
-        embodiment_id = (
-            torch.tensor([0]).repeat(x.shape[0]).to(device=embodiment_id.device)
+    motion_condition_length = 0
+    motion_condition_freqs = None
+    if motion_condition is not None and self.motion_patch_embedding is not None:
+        motion_condition_input = motion_condition.to(dtype=x.dtype)
+        motion_condition_emb = self.motion_patch_embedding(motion_condition_input)
+        motion_condition_grid_size = torch.tensor(
+            motion_condition_emb.shape[2:],
+            dtype=torch.long,
+            device=motion_condition_input.device,
         )
-        action_features = self.action_encoder(action, timestep_action, embodiment_id)
+        motion_condition_features = motion_condition_emb.flatten(start_dim=2).transpose(
+            1, 2
+        )
+        motion_condition_length = motion_condition_features.shape[1]
+        motion_condition_freqs = self._create_motion_freqs(
+            grid_size=motion_condition_grid_size,
+            start_motion_block=0,
+        )
+        x = torch.cat([x, motion_condition_features], dim=1)
+
+    if action is not None:
+        if embodiment_id is None:
+            embodiment_id = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        else:
+            embodiment_id = embodiment_id.to(device=x.device, dtype=torch.long).view(-1)
+        if embodiment_id.numel() != x.shape[0]:
+            raise ValueError(
+                f"embodiment_id must have batch size {x.shape[0]}, got {tuple(embodiment_id.shape)}"
+            )
+        num_embodiments = int(getattr(self.action_encoder, "num_embodiments", 1))
+        action_embodiment_id = embodiment_id
+        if embodiment_id.numel() and int(embodiment_id.min().item()) >= 36:
+            if num_embodiments in (13, 14):
+                action_embodiment_id = embodiment_id - 36
+            elif num_embodiments == 15 and int(embodiment_id.min().item()) >= 35:
+                action_embodiment_id = embodiment_id - 35
+        if action_embodiment_id.numel() and (
+            int(action_embodiment_id.min().item()) < 0
+            or int(action_embodiment_id.max().item()) >= num_embodiments
+        ):
+            raise ValueError(
+                f"embodiment_id values {embodiment_id.detach().cpu().tolist()} map to "
+                f"category ids {action_embodiment_id.detach().cpu().tolist()}, outside "
+                f"[0, {num_embodiments})."
+            )
+        action_features = self.action_encoder(action, timestep_action, action_embodiment_id)
         action_length = action_features.shape[1]
-        state_features = self.state_encoder(state, embodiment_id)
-        action_register = torch.cat([action_features, state_features], dim=1)
-        action_register_length = action_register.shape[1]
-        x = torch.cat([x, action_register], dim=1)
+        state_features = self.state_encoder(state, action_embodiment_id)
+
+        if motion is not None and self.motion_patch_embedding is not None:
+            m = motion.to(dtype=x.dtype)
+            motion_emb = self.motion_patch_embedding(m)
+            motion_grid_size = torch.tensor(
+                motion_emb.shape[2:],
+                dtype=torch.long,
+                device=m.device,
+            )
+            self._motion_grid_size = motion_grid_size
+            motion_features = motion_emb.flatten(start_dim=2).transpose(1, 2)
+            motion_length = motion_features.shape[1]
+            motion_freqs = self._create_motion_freqs(
+                grid_size=motion_grid_size,
+                start_motion_block=0,
+            )
+            extra_register = torch.cat(
+                [motion_features, action_features, state_features],
+                dim=1,
+            )
+        else:
+            motion_features = None
+            motion_length = 0
+            self._motion_grid_size = None
+            motion_freqs = None
+            extra_register = torch.cat([action_features, state_features], dim=1)
+
+        action_register_length = extra_register.shape[1]
+        x = torch.cat([x, extra_register], dim=1)
     else:
         action_features = None
         action_length = None
+        motion_features = None
+        motion_freqs = None
+        motion_length = 0
         state_features = None
-        action_register = None
         action_register_length = None
+        self._motion_grid_size = None
 
     timestep = timestep.unsqueeze(-1).expand(B, F, seq_len // F).reshape(B, -1)
     timestep_original = timestep.clone()
+
+    if motion_condition_length > 0:
+        timestep_motion_condition = torch.zeros(
+            B,
+            motion_condition_length,
+            device=timestep.device,
+            dtype=timestep.dtype,
+        )
+        timestep = torch.cat([timestep, timestep_motion_condition], dim=1)
 
     if action is not None:
         assert timestep_action is not None
         assert state_features is not None
         stride = timestep_action.shape[1] // state_features.shape[1]
         timestep_state = timestep_action[:, ::stride]
-        timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
+        if motion is not None and timestep_motion is not None and motion_length > 0:
+            assert self._motion_grid_size is not None
+            timestep_motion_exp = self._expand_motion_timestep_to_tokens(
+                timestep_motion=timestep_motion,
+                motion_grid_size=self._motion_grid_size,
+            )
+            timestep = torch.cat(
+                [timestep, timestep_motion_exp, timestep_action, timestep_state],
+                dim=1,
+            )
+        else:
+            timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
 
     e = self.time_embedding(
         sinusoidal_embedding_1d(self.freq_dim, timestep.flatten()).type_as(x)
@@ -105,6 +198,7 @@ def _forward_train(
 
         if aug_t is None:
             aug_t = torch.zeros_like(timestep_original)
+        assert aug_t is not None
 
         e_clean = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim, aug_t.flatten()).type_as(x)
@@ -114,6 +208,9 @@ def _forward_train(
         e0_clean = e0_clean.unflatten(dim=2, sizes=(6, self.dim))
         e0 = torch.cat([e0_clean, e0], dim=1)
 
+    motion_tokens_per_block = (
+        self.motion_token_length_per_block if motion is not None else 0
+    )
     kwargs = {
         "e": e0,
         "freqs": freqs,
@@ -122,6 +219,11 @@ def _forward_train(
         "action_register_length": action_register_length,
         "context": context,
         "is_tf": clean_x is not None,
+        "motion_length": motion_length,
+        "motion_tokens_per_block": motion_tokens_per_block,
+        "freqs_motion": motion_freqs,
+        "motion_condition_length": motion_condition_length,
+        "freqs_motion_condition": motion_condition_freqs,
     }
 
     def create_custom_forward(module):
@@ -141,9 +243,6 @@ def _forward_train(
             )
 
             if ckpt_use_reentrant:
-                # When gradient_checkpointing_use_reentrant=True,
-                # torch.utils.checkpoint.checkpoint only accepts
-                # positional arguments, not keyword arguments.
                 x, _ = torch.utils.checkpoint.checkpoint(
                     block,
                     x,
@@ -157,6 +256,12 @@ def _forward_train(
                     None,  # crossattn_cache
                     0,  # current_start_frame
                     clean_x is not None,  # is_tf
+                    None,  # layer_index
+                    motion_length,
+                    motion_tokens_per_block,
+                    motion_freqs,
+                    motion_condition_length,
+                    motion_condition_freqs,
                     use_reentrant=True,
                 )
             else:
@@ -172,9 +277,30 @@ def _forward_train(
     if clean_x is not None:
         x = x[:, clean_x.shape[1] :]
 
+    if (
+        action is not None
+        and motion is not None
+        and self.motion_head is not None
+        and motion_length > 0
+    ):
+        motion_start = seq_len + motion_condition_length
+        motion_end = motion_start + motion_length
+        motion_tokens = x[:, motion_start:motion_end]
+        e_motion = e[:, motion_start:motion_end]
+        motion_noise_pred = self.motion_head(motion_tokens, e_motion.unsqueeze(2))
+        motion_noise_pred = self.unpatchify_motion(
+            motion_noise_pred,
+            self._motion_grid_size,
+        )
+    else:
+        motion_noise_pred = None
+
     if action is not None:
-        action_noise_pred = x[:, seq_len : seq_len + action_length]
-        action_noise_pred = self.action_decoder(action_noise_pred, embodiment_id)
+        action_start = seq_len + motion_condition_length
+        if motion is not None:
+            action_start += motion_length
+        action_noise_pred = x[:, action_start : action_start + action_length]
+        action_noise_pred = self.action_decoder(action_noise_pred, action_embodiment_id)
     else:
         action_noise_pred = None
 
@@ -182,4 +308,4 @@ def _forward_train(
     e_video = e[:, :seq_len]
     x_video = self.head(x_video, e_video.unsqueeze(2))
     video_noise_pred = self.unpatchify(x_video, grid_size)
-    return video_noise_pred, action_noise_pred
+    return video_noise_pred, action_noise_pred, motion_noise_pred

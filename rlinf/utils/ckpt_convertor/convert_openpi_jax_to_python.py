@@ -36,7 +36,12 @@ import json
 import os
 import pathlib
 import shutil
+import sys
 from typing import Literal
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 import openpi.models.gemma
@@ -688,7 +693,19 @@ def main(
         precision: Precision for model conversion
         inspect_only: Only inspect parameter keys, don't convert
     """
-    model_config = _config.get_config(config_name).model
+    try:
+        model_config = _config.get_config(config_name).model
+    except ValueError:
+        if config_name == "pi0_real_world_joint":
+            model_config = openpi.models.pi0_config.Pi0Config(action_horizon=48)
+        elif config_name == "pi05_real_world_joint":
+            model_config = openpi.models.pi0_config.Pi0Config(
+                pi05=True,
+                action_horizon=48,
+                discrete_state_input=True,
+            )
+        else:
+            raise
     if not isinstance(model_config, openpi.models.pi0_config.Pi0Config):
         raise ValueError(f"Config {config_name} is not a Pi0Config")
     if inspect_only:

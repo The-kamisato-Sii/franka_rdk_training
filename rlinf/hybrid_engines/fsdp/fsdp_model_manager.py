@@ -246,6 +246,89 @@ class FSDPModelManager:
         except Exception as e:
             self._logger.warning(f"[FSDP] Liger kernels not applied: {e}")
 
+    @staticmethod
+    def _extract_model_state_dict_from_checkpoint(checkpoint):
+        if isinstance(checkpoint, dict):
+            for key in ("model", "state_dict", "model_state_dict"):
+                value = checkpoint.get(key)
+                if isinstance(value, dict):
+                    return value
+        return checkpoint
+
+    def _load_initial_model_state_dict_if_needed(self) -> None:
+        path = self._cfg.model.get("init_model_state_dict_path", None)
+        if path is None or str(path).strip() in ("", "null", "None"):
+            return
+
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        strict = bool(self._cfg.model.get("init_model_state_dict_strict", False))
+        mmap = bool(self._cfg.model.get("init_model_state_dict_mmap", True))
+        broadcast_from_rank0 = bool(
+            self._cfg.model.get("init_model_state_dict_broadcast_from_rank0", True)
+        )
+        skip_substrings = list(
+            self._cfg.model.get(
+                "init_model_state_dict_skip_key_substrings",
+                [
+                    "action_head.model.state_encoder.",
+                    "action_head.model.action_encoder.",
+                    "action_head.model.action_decoder.",
+                ],
+            )
+        )
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        state_dict = {}
+        if rank == 0:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Initial model state_dict file not found: {path}")
+            self._logger.info(
+                "[FSDP] Loading initial model weights only from %s; "
+                "optimizer/lr_scheduler/dataloader state will not be restored.",
+                path,
+            )
+            load_kwargs = {"map_location": "cpu", "weights_only": True}
+            if mmap:
+                load_kwargs["mmap"] = True
+            try:
+                checkpoint = torch.load(path, **load_kwargs)
+            except TypeError:
+                load_kwargs.pop("mmap", None)
+                checkpoint = torch.load(path, **load_kwargs)
+            state_dict = self._extract_model_state_dict_from_checkpoint(checkpoint)
+            if not isinstance(state_dict, dict):
+                raise TypeError(
+                    f"Expected a state_dict-like mapping in {path}, got {type(state_dict)!r}"
+                )
+            if any(".base_layer." in key for key in state_dict):
+                state_dict = {
+                    key.replace(".base_layer.", "."): value
+                    for key, value in state_dict.items()
+                }
+            before = len(state_dict)
+            state_dict = {
+                key: value
+                for key, value in state_dict.items()
+                if not any(substr in key for substr in skip_substrings)
+            }
+            self._logger.info(
+                "[FSDP] Initial model state_dict keys: kept=%s skipped=%s skip_substrings=%s",
+                len(state_dict),
+                before - len(state_dict),
+                skip_substrings,
+            )
+
+        self._strategy.load_model_with_state_dict(
+            self.model,
+            state_dict,
+            cpu_offload=True,
+            full_state_dict=True,
+            strict=strict,
+            broadcast_from_rank0=broadcast_from_rank0,
+        )
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
     def setup_model_and_optimizer(self) -> None:
         """
         Setup model, lr_scheduler, optimizer and grad_scaler.
@@ -280,6 +363,7 @@ class FSDPModelManager:
         self.model = self._strategy.wrap_model(
             model=module, device_mesh=self._device_mesh
         )
+        self._load_initial_model_state_dict_if_needed()
         self.optimizer = self.build_optimizer(
             model=self.model, enable_critic_warmup=self.critic_warmup_steps > 0
         )
@@ -333,7 +417,11 @@ class FSDPModelManager:
             self.is_optimizer_offloaded = False
 
         self._strategy.load_checkpoint(
-            self.model, self.optimizer, self.lr_scheduler, load_path
+            self.model,
+            self.optimizer,
+            self.lr_scheduler,
+            load_path,
+            checkpoint_format=self._cfg.fsdp_config.get("checkpoint_format", "dcp"),
         )
 
     def save_checkpoint(self, save_path: str, step: int = 0) -> None:
@@ -360,6 +448,7 @@ class FSDPModelManager:
             save_full_model_weights=self._cfg.fsdp_config.get(
                 "save_full_model_weights", True
             ),
+            checkpoint_format=self._cfg.fsdp_config.get("checkpoint_format", "dcp"),
         )
 
         if restore_weight_offload:

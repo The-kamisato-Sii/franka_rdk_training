@@ -1,0 +1,121 @@
+defaults:
+  - training_backend/fsdp@actor.fsdp_config
+  - model/pi0_5@actor.model
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}
+    - file://${oc.env:EMBODIED_PATH}/config
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: all
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "real_world_franka_dual_openpi_pi05_sft_filtered"
+    logger_backends: ["tensorboard"]
+  max_epochs: -1
+  max_steps: 100000
+  val_check_interval: -1
+  save_interval: 20000
+  log_interval: 100
+  resume_dir: null
+
+data:
+  dataset_type: openpi_real_world_joint
+  train_data_paths: ${oc.env:REAL_WORLD_FRANKA_DUAL_ROOT,/inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_filtered}
+  real_world_joint_root: ${data.train_data_paths}
+  openpi_real_world_joint_require_lerobot_v3: true
+  num_workers: 2
+  prefetch_factor: 1
+  pin_memory: true
+  parquet_cache_size: 16
+  video_backend: pyav
+  video_tolerance_s: 0.1
+  openpi_real_world_joint_sampling_mode: fixed_window
+  openpi_real_world_joint_max_chunk_size: 1
+  openpi_real_world_joint_num_frames: 1
+  openpi_real_world_joint_max_state_dim: 32
+  openpi_real_world_joint_use_state: true
+  openpi_real_world_joint_include_motion: false
+  openpi_real_world_joint_action_dim: 32
+  openpi_real_world_joint_state_dim: 32
+  openpi_real_world_joint_action_horizon: 48
+  openpi_real_world_joint_loss_action_dim: 16
+  openpi_real_world_joint_validate_first_sample: true
+  openpi_real_world_joint_norm_stats_mode: global_lerobot_q01_q99
+  openpi_real_world_joint_norm_stats_max_frames: null
+  openpi_real_world_joint_infinite_loader: false
+  real_world_joint_max_tasks: null
+  real_world_joint_max_tasks_per_tag: null
+  real_world_joint_tags: [real_world_franka_dual]
+  real_world_joint_task_name_contains: null
+  real_world_joint_discover_log_every: 20
+  real_world_joint_fast_local_index: true
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 8
+  global_batch_size: 128
+  seed: 42
+
+  model:
+    model_type: "openpi"
+    precision: null
+    model_path: ${oc.env:OPENPI_PI05_PYTORCH_CKPT,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/pi05_base_pytorch_real_world_joint}
+    action_dim: 32
+    action_horizon: 48
+    num_action_chunks: 48
+    add_value_head: False
+    openpi:
+      config_name: pi05_real_world_joint
+      repo_id: real_world_franka_dual_openpi_pi05_sft_filtered
+      norm_stats_key: real_world_franka_dual_openpi_pi05_sft_filtered
+      norm_stats_dir: ${data.train_data_paths}
+      detach_critic_input: True
+      discrete_state_input: True
+      num_images_in_input: 3
+      train_expert_only: True
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+
+  optim:
+    lr: 2.5e-5
+    value_lr: 1.55e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    warmup_style: "cosine"
+    lr_scheduler: "cosine"
+    lr_warmup_steps: 5000
+    total_training_steps: 100000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    checkpoint_format: local_shard
+    save_full_model_weights: False
+    grad_scaler:
+      enabled: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+    amp_autocast:
+      enabled: False
+      precision: "bf16"
