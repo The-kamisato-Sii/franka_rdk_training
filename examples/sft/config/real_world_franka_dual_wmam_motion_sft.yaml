@@ -13,7 +13,7 @@ hydra:
     - file://${oc.env:EMBODIED_PATH}/config
 
 cluster:
-  num_nodes: 2
+  num_nodes: 1
   component_placement:
     actor: all
 
@@ -49,6 +49,8 @@ data:
   motion_dir_name: ${oc.env:REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME,motions_sam}
   scene_flow_training: true
   use_sam_scene_flow: true
+  real_world_joint_norm_stats_mode: global_lerobot_q01_q99
+  use_proprioception: false
   scene_flow_visconf_threshold: 0.2
   drop_motion_npy_file_cache: true
   real_world_joint_max_tasks: ${oc.env:REAL_WORLD_JOINT_MAX_TASKS,null}
@@ -164,7 +166,7 @@ actor:
           max_num_embodiments: 14
           num_frame_per_block: 2
           num_action_per_block: 48
-          num_state_per_block: 1
+          num_state_per_block: 0
           concat_first_frame_latent: false
         vae_cfg:
           _target_: groot.vla.model.dreamzero.modules.wan_video_vae.WanVideoVAE38
@@ -174,7 +176,7 @@ actor:
           vae_pretrained_path: ${actor.model.vae_pretrained_path}
 
   optim:
-    lr: 5.0e-5
+    lr: 1.0e-5
     value_lr: 1.55e-4
     adam_beta1: 0.95
     adam_beta2: 0.999

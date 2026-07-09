@@ -703,6 +703,7 @@ class _RealWorldJointDreamTransform:
         action_horizon: int,
         embodiment_tag_mapping: dict[str, int],
         tokenizer_path: str,
+        use_proprioception: bool,
     ):
         self.default_instruction = default_instruction
         self.language_dropout_prob = float(language_dropout_prob)
@@ -717,6 +718,7 @@ class _RealWorldJointDreamTransform:
         self.action_horizon = int(action_horizon)
         self.embodiment_tag_mapping = dict(embodiment_tag_mapping)
         self.tokenizer_path = tokenizer_path
+        self.use_proprioception = bool(use_proprioception)
         self.embodiment_tag = None
         self.training = True
 
@@ -754,10 +756,14 @@ class _RealWorldJointDreamTransform:
         return str(text).lower()
 
     def _prepare_state(self, data: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+        if not self.use_proprioception:
+            state = np.zeros((0, self.max_state_dim), dtype=np.float32)
+            return state, np.zeros_like(state, dtype=bool)
+
         state = data.get("state")
         if state is None:
-            state = np.zeros((self.state_horizon, self.max_state_dim), dtype=np.float32)
-            return state, np.zeros_like(state, dtype=bool)
+            out = np.zeros((self.state_horizon, self.max_state_dim), dtype=np.float32)
+            return out, np.zeros_like(out, dtype=bool)
         if torch.is_tensor(state):
             state = state.detach().cpu().numpy()
         state = np.asarray(state, dtype=np.float32)
@@ -785,8 +791,10 @@ class _RealWorldJointDreamTransform:
         n_dims = min(int(action.shape[1]), self.max_action_dim)
         out = np.zeros((action.shape[0], self.max_action_dim), dtype=np.float32)
         out[:, :n_dims] = action[:, :n_dims]
-        mask = np.zeros_like(out, dtype=bool)
-        mask[:, :n_dims] = True
+        # Padded action dimensions are real training targets too: their target
+        # value is zero after padding, and the action head should learn that
+        # full 32-D target/noise distribution instead of masking dimensions out.
+        mask = np.ones_like(out, dtype=bool)
         return out, mask
 
     def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -914,13 +922,13 @@ def _metadata_for_task(
     action_keys: list[str],
     *,
     stats_root: Path | None = None,
-    norm_stats_mode: str = "task_lerobot_q01_q99",
+    norm_stats_mode: str = "global_lerobot_q01_q99",
 ):
     """为单个任务构建 transform 需要的 metadata 和归一化统计量。
 
-    ``task_lerobot_q01_q99`` preserves the original per-task behavior.  For
-    debug/overfit runs we also support ``global_lerobot_q01_q99`` so DreamZero
-    uses the same dataset-root q01/q99 normalization convention as OpenPI.
+    ``global_lerobot_q01_q99`` is the real-world default so every task shares
+    one dataset-root q01/q99 normalization convention, matching OpenPI and
+    deployment.
     """
 
     from groot.vla.data.schema import DatasetMetadata
@@ -982,7 +990,7 @@ def _metadata_for_task(
     return DatasetMetadata.model_validate(blob)
 
 
-def _make_transform(*, tokenizer_path: str, max_seq_len: int, max_state_dim: int, max_action_dim: int, embodiment_tag_mapping: dict[str, int], include_motion: bool, video_keys: list[str], state_keys: list[str], action_keys: list[str]):
+def _make_transform(*, tokenizer_path: str, max_seq_len: int, max_state_dim: int, max_action_dim: int, embodiment_tag_mapping: dict[str, int], include_motion: bool, use_proprioception: bool, video_keys: list[str], state_keys: list[str], action_keys: list[str]):
     """构建 real-world joint 使用的完整 transform pipeline。"""
 
     _ensure_legacy_tokenizer_path(tokenizer_path)
@@ -1014,6 +1022,7 @@ def _make_transform(*, tokenizer_path: str, max_seq_len: int, max_state_dim: int
             action_horizon=48,
             embodiment_tag_mapping=embodiment_tag_mapping,
             tokenizer_path=tokenizer_path,
+            use_proprioception=use_proprioception,
         ),
     ]
     return _LocalComposedTransform(transforms=transforms)
@@ -1912,12 +1921,13 @@ def build_real_world_joint_sft_dataloader(cfg, world_size: int, rank: int, data_
     video_in_chunk_offsets = data_cfg.get("video_in_chunk_offsets")
     if video_in_chunk_offsets is not None:
         video_in_chunk_offsets = tuple(int(x) for x in video_in_chunk_offsets)
-    norm_stats_mode = str(data_cfg.get("real_world_joint_norm_stats_mode", "task_lerobot_q01_q99"))
+    norm_stats_mode = str(data_cfg.get("real_world_joint_norm_stats_mode", "global_lerobot_q01_q99"))
+    use_proprioception = bool(data_cfg.get("use_proprioception", True))
 
     logger.info(
         "Discovered real-world joint tasks: motion=%s scene_flow_training=%s use_sam_scene_flow=%s "
         "scene_flow_visconf_threshold=%s sampling_mode=%s max_chunk_size=%s action_horizon=%s macro_stride=%s "
-        "video_in_chunk_offsets=%s norm_stats_mode=%s total_tasks=%s tags=%s",
+        "video_in_chunk_offsets=%s norm_stats_mode=%s use_proprioception=%s total_tasks=%s tags=%s",
         include_motion,
         scene_flow_training,
         use_sam_scene_flow,
@@ -1928,6 +1938,7 @@ def build_real_world_joint_sft_dataloader(cfg, world_size: int, rank: int, data_
         macro_stride if macro_stride is not None else action_horizon,
         video_in_chunk_offsets,
         norm_stats_mode,
+        use_proprioception,
         sum(len(v) for v in discovered.values()),
         {tag: len(paths) for tag, paths in discovered.items() if paths},
     )
@@ -1958,6 +1969,7 @@ def build_real_world_joint_sft_dataloader(cfg, world_size: int, rank: int, data_
                 max_action_dim=max_action_dim,
                 embodiment_tag_mapping=embodiment_tag_mapping,
                 include_motion=include_motion,
+                use_proprioception=use_proprioception,
                 video_keys=video_keys,
                 state_keys=state_keys,
                 action_keys=action_keys,

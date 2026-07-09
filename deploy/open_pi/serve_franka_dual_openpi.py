@@ -28,7 +28,7 @@ Current request payload shape:
 
 Response payload:
 
-    {"actions": np.ndarray[n_action_steps, 16]}
+    {"actions": np.ndarray[action_horizon, 16]}
 
 The returned actions are normalized OpenPI model outputs. ``openpi_pi05_client``
 defaults to ``server_returns_normalized_actions=true`` and applies q01/q99
@@ -256,8 +256,8 @@ class OpenPIFrankaDualRunner:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.device = torch.device(args.device)
-        self.n_action_steps = int(args.n_action_steps)
         self.action_dim = int(args.return_action_dim)
+        self._checkpoint_model_config = self._load_checkpoint_model_config()
         self.log_input_output = bool(args.log_input_output)
         self.log_dir: Path | None = None
         self._log_request_index = 0
@@ -281,7 +281,46 @@ class OpenPIFrankaDualRunner:
         self.model.eval()
         self._setup_preprocessed_tokenizer()
 
+    def _load_checkpoint_model_config(self) -> dict[str, Any]:
+        candidates = []
+        base_model_path = Path(self.args.base_model_path)
+        checkpoint_path = Path(self.args.checkpoint_path)
+        if base_model_path.is_dir():
+            candidates.append(base_model_path / "metadata.pt")
+        if checkpoint_path.is_dir():
+            candidates.append(checkpoint_path / "metadata.pt")
+
+        for metadata_path in candidates:
+            if not metadata_path.is_file():
+                continue
+            try:
+                metadata = torch.load(metadata_path, map_location="cpu", weights_only=False)
+            except Exception as exc:
+                print(f"[open_pi] failed to read checkpoint metadata {metadata_path}: {exc}", flush=True)
+                continue
+            config = metadata.get("config", {}) if isinstance(metadata, dict) else {}
+            model_config = config.get("model", {}) if isinstance(config, dict) else {}
+            if isinstance(model_config, dict) and model_config:
+                print(
+                    "[open_pi] loaded checkpoint model config from "
+                    f"{metadata_path}: action_horizon={model_config.get('action_horizon')} "
+                    f"discrete_state_input={model_config.get('discrete_state_input')} "
+                    f"action_dim={model_config.get('action_dim')}",
+                    flush=True,
+                )
+                return dict(model_config)
+
+        print(
+            "[open_pi] checkpoint metadata model config not found; "
+            "falling back to pi05_real_world_joint defaults.",
+            flush=True,
+        )
+        return {}
+
     def _base_cfg(self):
+        model_config = self._checkpoint_model_config
+        discrete_state_input = bool(model_config.get("discrete_state_input", True))
+        action_horizon = int(model_config.get("action_horizon", 48))
         return OmegaConf.create(
             {
                 "model_path": str(self.args.base_model_path),
@@ -295,8 +334,9 @@ class OpenPIFrankaDualRunner:
                     "norm_stats_key": "real_world_franka_dual",
                     "detach_critic_input": True,
                     "num_images_in_input": 3,
-                    "train_expert_only": True,
-                    "action_chunk": 48,
+                    "train_expert_only": False,
+                    "discrete_state_input": discrete_state_input,
+                    "action_chunk": action_horizon,
                     "num_steps": int(self.args.num_steps),
                     "noise_method": str(self.args.noise_method),
                     "noise_level": float(self.args.noise_level),
@@ -389,9 +429,9 @@ class OpenPIFrankaDualRunner:
             "prompt": prompt,
         }
         processed = self._tokenize_preprocessed_prompt(processed)
-        # Training applies TokenizePrompt before PadStatesAndActions. Keep the
-        # tokenizer state unpadded, then provide the padded state tensor to the
-        # action expert to match the OpenPI pi0.5 SFT input transform exactly.
+        # Match the OpenPI training transform order exactly:
+        # TokenizePrompt sees the raw LeRobot state width (16 for Franka dual),
+        # then PadStatesAndActions pads the action-expert state to 32 dims.
         processed["state"] = model_state
         for key in ("tokenized_prompt", "tokenized_prompt_mask", "token_ar_mask", "token_loss_mask"):
             value = processed.get(key)
@@ -423,10 +463,12 @@ class OpenPIFrankaDualRunner:
             image = _chw_minus_one_one_to_hwc_uint8(images_payload[key])
             Image.fromarray(image).save(input_dir / f"{prefix}_{key}.png")
 
-        prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
+        raw_prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
+        prompt = raw_prompt.lower()
         prompt_record = {
             "request_index": request_index,
             "prompt": prompt,
+            "raw_prompt": raw_prompt,
             "task": payload.get("task"),
             "model_type": payload.get("model_type"),
             "stats_task_id": payload.get("stats_task_id"),
@@ -449,23 +491,19 @@ class OpenPIFrankaDualRunner:
         np.save(output_dir / f"{prefix}_normalized_actions.npy", np.asarray(actions, dtype=np.float32))
 
 
-    def _masked_initial_noise(self, observation) -> torch.Tensor:
+    def _initial_noise(self, observation) -> torch.Tensor:
         batch_size = int(observation.state.shape[0])
-        action_horizon = int(getattr(self.model.config, "action_horizon", self.n_action_steps))
+        action_horizon = int(getattr(self.model.config, "action_horizon", 48))
         model_action_dim = int(getattr(self.model.config, "action_dim", 32))
-        real_action_dim = max(0, min(int(self.action_dim), model_action_dim))
-        noise = torch.randn(
+        return torch.randn(
             (batch_size, action_horizon, model_action_dim),
             device=observation.state.device,
             dtype=torch.float32,
         )
-        if real_action_dim < model_action_dim:
-            noise[..., real_action_dim:] = 0.0
-        return noise
 
     @torch.inference_mode()
     def infer(self, payload: dict) -> np.ndarray:
-        prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
+        prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt).lower()
         observation = self._observation_from_client_preprocessed(payload, prompt)
         if observation is None:
             raise ValueError(
@@ -474,7 +512,7 @@ class OpenPIFrankaDualRunner:
                 "and image preprocessing from openpi_pi05_client."
             )
 
-        noise = self._masked_initial_noise(observation)
+        noise = self._initial_noise(observation)
         outputs = self.model.sample_actions(
             observation,
             noise=noise,
@@ -486,7 +524,7 @@ class OpenPIFrankaDualRunner:
         # q01/q99 Unnormalize, and the robot client owns that inverse step.
         actions_np = outputs["actions"][0].detach().float().cpu().numpy()
         return np.ascontiguousarray(
-            actions_np[: self.n_action_steps, : self.action_dim],
+            actions_np[:, : self.action_dim],
             dtype=np.float32,
         )
 
@@ -499,7 +537,9 @@ def build_app(runner: OpenPIFrankaDualRunner) -> FastAPI:
         return {
             "ok": True,
             "device": str(runner.device),
-            "n_action_steps": runner.n_action_steps,
+            "action_horizon": int(getattr(runner.model.config, "action_horizon", 48)),
+            "discrete_state_input": bool(getattr(runner.model.config, "discrete_state_input", False)),
+            "model_action_dim": int(getattr(runner.model.config, "action_dim", 32)),
             "return_action_dim": runner.action_dim,
             "num_steps": int(runner.model.config.num_steps),
             "noise_method": str(runner.model.config.noise_method),
@@ -553,13 +593,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-model-path", type=Path, default=DEFAULT_BASE_MODEL)
     parser.add_argument("--checkpoint-path", type=Path, default=DEFAULT_CKPT)
     parser.add_argument("--checkpoint-rank", type=int, default=0)
-    parser.add_argument("--n-action-steps", type=int, default=48)
     parser.add_argument("--return-action-dim", type=int, default=16)
     parser.add_argument(
         "--num-steps",
         type=int,
-        default=5,
-        help="OpenPI flow/diffusion denoising steps. 5 matches the RLinf pi0.5 SFT training config.",
+        default=10,
+        help="OpenPI flow/diffusion denoising steps. 10 matches the official OpenPI pi0.5 default.",
     )
     parser.add_argument(
         "--noise-method",

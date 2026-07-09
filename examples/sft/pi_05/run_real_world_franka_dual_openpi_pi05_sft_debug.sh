@@ -47,8 +47,8 @@ export NUM_GPUS NNODES NODE_RANK
 CONFIG=${CONFIG:-real_world_franka_dual_openpi_pi05_sft}
 export REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT:-/inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test}
 export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_openpi_pi05_sft_arrange_vegetables}
-export ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-null}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_openpi_pi05_sft_arrange_vegetables_v2}
+export ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-float32}
 export MAX_STEPS=20000
 export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-${MAX_STEPS}}
 export GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}

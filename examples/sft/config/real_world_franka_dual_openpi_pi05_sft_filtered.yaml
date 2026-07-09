@@ -46,12 +46,12 @@ data:
   openpi_real_world_joint_max_chunk_size: 1
   openpi_real_world_joint_num_frames: 1
   openpi_real_world_joint_max_state_dim: 32
-  openpi_real_world_joint_use_state: true
+  openpi_real_world_joint_use_state: false
   openpi_real_world_joint_include_motion: false
   openpi_real_world_joint_action_dim: 32
   openpi_real_world_joint_state_dim: 32
   openpi_real_world_joint_action_horizon: 48
-  openpi_real_world_joint_loss_action_dim: 16
+  openpi_real_world_joint_loss_action_dim: 32
   openpi_real_world_joint_validate_first_sample: true
   openpi_real_world_joint_norm_stats_mode: global_lerobot_q01_q99
   openpi_real_world_joint_norm_stats_max_frames: null
@@ -72,7 +72,7 @@ actor:
 
   model:
     model_type: "openpi"
-    precision: null
+    precision: ${oc.env:ACTOR_MODEL_PRECISION,float32}
     model_path: ${oc.env:OPENPI_PI05_PYTORCH_CKPT,/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/checkpoints/pi05_base_pytorch_real_world_joint}
     action_dim: 32
     action_horizon: 48

@@ -26,7 +26,7 @@ detect_num_gpus() {
 }
 
 PET_NPROC_PER_NODE=${PET_NPROC_PER_NODE:-${NUM_GPUS:-$(detect_num_gpus)}}
-PET_NNODES=${PET_NNODES:-${NNODES:-2}}
+PET_NNODES=${PET_NNODES:-${NNODES:-1}}
 PET_NODE_RANK=${PET_NODE_RANK:-${NODE_RANK:-0}}
 MASTER_ADDR=${MASTER_ADDR:-${RAY_HEAD_ADDR:-127.0.0.1}}
 MASTER_PORT=${MASTER_PORT:-${RAY_HEAD_PORT:-6379}}
@@ -41,8 +41,25 @@ export REAL_WORLD_FRANKA_DUAL_MOTION_ROOT=${REAL_WORLD_FRANKA_DUAL_MOTION_ROOT:-
 export REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME=${REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME:-motions_sam}
 export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/results_franka_dual_wmam}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_wmam_motion_sft}
-export GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
+USER_GLOBAL_BATCH_SIZE_SET=${GLOBAL_BATCH_SIZE+x}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
 export ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-fp32}
+
+require_global_lerobot_stats() {
+  local root="$1"
+  local stats_path="${root}/stats.json"
+  if [ ! -f "${stats_path}" ]; then
+    cat >&2 <<EOF
+[RLinf] ERROR: missing global LeRobot q01/q99 stats: ${stats_path}
+[RLinf] This script uses real_world_joint_norm_stats_mode=global_lerobot_q01_q99.
+[RLinf] Generate it before training, for example:
+[RLinf]   python toolkits/lerobot/write_global_lerobot_stats.py --root "${root}"
+EOF
+    exit 2
+  fi
+}
+
+require_global_lerobot_stats "${REAL_WORLD_FRANKA_DUAL_MOTION_ROOT}"
 
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
@@ -50,7 +67,11 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
 fi
 
 TOTAL_GPUS=$((NNODES * NUM_GPUS))
-export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))}
+DEFAULT_MICRO_BATCH_SIZE=$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))
+if [ "${DEFAULT_MICRO_BATCH_SIZE}" -lt 1 ]; then
+  DEFAULT_MICRO_BATCH_SIZE=1
+fi
+export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-${DEFAULT_MICRO_BATCH_SIZE}}
 RAY_PORT=${RAY_PORT:-${RAY_HEAD_PORT:-29500}}
 RAY_HEAD_ADDR=${RAY_HEAD_ADDR:-${MASTER_ADDR}}
 RAY_ADDRESS="${RAY_HEAD_ADDR}:${RAY_PORT}"
@@ -127,7 +148,9 @@ fi
 echo "[RLinf] NUM_GPUS=${NUM_GPUS} NNODES=${NNODES} NODE_RANK=${NODE_RANK} RAY_ADDRESS=${RAY_ADDRESS} ACTOR_PLACEMENT=${ACTOR_PLACEMENT} CONFIG=${CONFIG}"
 echo "[RLinf] REAL_WORLD_FRANKA_DUAL_MOTION_ROOT=${REAL_WORLD_FRANKA_DUAL_MOTION_ROOT}"
 echo "[RLinf] REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME=${REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME}"
+echo "[RLinf] precision override: actor.model.precision=${ACTOR_MODEL_PRECISION}"
 echo "[RLinf] outputs: ${RUN_LOG_PATH}/${EXPERIMENT_NAME}/{tensorboard,checkpoints}"
+echo "[RLinf] global_batch_size=${GLOBAL_BATCH_SIZE} micro_batch_size=${MICRO_BATCH_SIZE} total_gpus=${TOTAL_GPUS}"
 
 if [ "${RLINF_WAIT_FOR_RAY_GPUS:-1}" = "1" ]; then
   bash "${REPO_PATH}/ray_utils/check_ray.sh" "${TOTAL_GPUS}"
@@ -136,10 +159,12 @@ fi
 extra_args=(
   runner.logger.log_path="${RUN_LOG_PATH}"
   runner.logger.experiment_name="${EXPERIMENT_NAME}"
-  actor.global_batch_size="${GLOBAL_BATCH_SIZE}"
   actor.micro_batch_size="${MICRO_BATCH_SIZE}"
   actor.model.precision="${ACTOR_MODEL_PRECISION}"
 )
+if [ -n "${USER_GLOBAL_BATCH_SIZE_SET}" ]; then
+  extra_args+=(actor.global_batch_size="${GLOBAL_BATCH_SIZE}")
+fi
 if [ -n "${RESUME_DIR:-}" ]; then
   extra_args+=(runner.resume_dir="${RESUME_DIR}")
 fi

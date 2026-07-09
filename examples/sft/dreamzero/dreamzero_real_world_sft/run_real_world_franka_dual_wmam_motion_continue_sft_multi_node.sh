@@ -79,16 +79,21 @@ unset RESUME_DIR
 
 export CONFIG=${CONFIG:-real_world_franka_dual_wmam_motion_sft}
 export NUM_GPUS=${NUM_GPUS:-8}
-export NNODES=${NNODES:-2}
+export NNODES=${NNODES:-1}
 export PET_NPROC_PER_NODE=${PET_NPROC_PER_NODE:-${NUM_GPUS}}
 export PET_NNODES=${PET_NNODES:-${NNODES}}
 export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/results_franka_dual_wmam_continue}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_wmam_motion_continue_sft}
 export ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-fp32}
 export REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME=${REAL_WORLD_FRANKA_DUAL_MOTION_DIR_NAME:-motions_sam}
-export GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
+USER_GLOBAL_BATCH_SIZE_SET=${GLOBAL_BATCH_SIZE+x}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
 TOTAL_GPUS=$((NNODES * NUM_GPUS))
-export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))}
+DEFAULT_MICRO_BATCH_SIZE=$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))
+if [ "${DEFAULT_MICRO_BATCH_SIZE}" -lt 1 ]; then
+  DEFAULT_MICRO_BATCH_SIZE=1
+fi
+export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-${DEFAULT_MICRO_BATCH_SIZE}}
 
 if [ -n "${RESOLVED_PRETRAINED_MODEL_STATE_DICT_PATH}" ]; then
   echo "[RLinf] Continue WMAM from model weights: ${RESOLVED_PRETRAINED_MODEL_STATE_DICT_PATH}"
@@ -97,13 +102,17 @@ else
 fi
 echo "[RLinf] Fresh optimizer/scheduler/dataloader state; runner.resume_dir is forced to null."
 
+extra_args=(
+  runner.resume_dir=null
+  actor.micro_batch_size="${MICRO_BATCH_SIZE}"
+  "${INIT_MODEL_STATE_DICT_OVERRIDE}"
+  actor.model.init_model_state_dict_strict=false
+  actor.model.init_model_state_dict_broadcast_from_rank0=true
+)
+if [ -n "${USER_GLOBAL_BATCH_SIZE_SET}" ]; then
+  extra_args+=(actor.global_batch_size="${GLOBAL_BATCH_SIZE}")
+fi
+
 exec "${SCRIPT_DIR}/run_real_world_franka_dual_wmam_motion_sft_multi_node.sh" \
-  runner.resume_dir=null \
-  runner.max_steps=100000 \
-  actor.micro_batch_size="${MICRO_BATCH_SIZE}" \
-  actor.global_batch_size="${GLOBAL_BATCH_SIZE}" \
-  actor.optim.total_training_steps=100000 \
-  "${INIT_MODEL_STATE_DICT_OVERRIDE}" \
-  actor.model.init_model_state_dict_strict=false \
-  actor.model.init_model_state_dict_broadcast_from_rank0=true \
+  "${extra_args[@]}" \
   "$@"

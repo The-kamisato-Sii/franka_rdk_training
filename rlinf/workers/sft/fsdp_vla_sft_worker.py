@@ -19,7 +19,7 @@ from collections import deque
 from typing import Any
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, open_dict
 from torch.utils._pytree import tree_map
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -35,6 +35,7 @@ logger = get_logger()
 
 class FSDPVlaSftWorker(FSDPSftWorker):
     def __init__(self, cfg: DictConfig):
+        self._sync_real_world_joint_proprioception_config(cfg)
         super().__init__(cfg)
         self._dreamzero_loss = None
         self._dreamzero_loss_sample_metadata: list[dict[str, Any]] = []
@@ -45,27 +46,42 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         self._first_batch_jsonl_path = self._build_first_batch_jsonl_path()
         self._logged_dreamzero_start_samples = False
 
-    def _openpi_action_mask(self, actions: torch.Tensor) -> torch.Tensor:
-        real_dim = int(self.cfg.data.get("openpi_real_world_joint_loss_action_dim", 16))
-        real_dim = max(1, min(real_dim, int(actions.shape[-1])))
-        mask = torch.zeros_like(actions, dtype=torch.float32, device=actions.device)
-        mask[..., :real_dim] = 1.0
-        return mask
+    @staticmethod
+    def _sync_real_world_joint_proprioception_config(cfg: DictConfig) -> None:
+        try:
+            model_type = SupportedModel(cfg.actor.model.model_type)
+        except Exception:
+            return
+        if model_type not in [SupportedModel.DREAMZERO, SupportedModel.WMAM]:
+            return
+        if cfg.data.get("dataset_type", None) != "real_world_joint":
+            return
+        if "use_proprioception" not in cfg.data:
+            return
+
+        use_proprioception = bool(cfg.data.get("use_proprioception"))
+        target_num_state_per_block = 1 if use_proprioception else 0
+        diffusion_model_cfg = cfg.actor.model.action_head_cfg.config.diffusion_model_cfg
+        current_num_state_per_block = diffusion_model_cfg.get(
+            "num_state_per_block", None
+        )
+        if current_num_state_per_block == target_num_state_per_block:
+            return
+
+        with open_dict(diffusion_model_cfg):
+            diffusion_model_cfg.num_state_per_block = target_num_state_per_block
+        logger.info(
+            "Synced real_world_joint proprioception config: "
+            "use_proprioception=%s, num_state_per_block=%s",
+            use_proprioception,
+            target_num_state_per_block,
+        )
 
     def _is_openpi_real_world_joint(self) -> bool:
         return (
             SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.OPENPI
             and self.cfg.data.get("dataset_type", None) == "openpi_real_world_joint"
         )
-
-    def _masked_openpi_loss(self, losses: torch.Tensor, action_mask: torch.Tensor) -> torch.Tensor:
-        if losses.shape != action_mask.shape:
-            raise ValueError(
-                f"OpenPI action loss mask shape mismatch: losses={tuple(losses.shape)} "
-                f"mask={tuple(action_mask.shape)}"
-            )
-        mask = action_mask.to(device=losses.device, dtype=losses.dtype)
-        return (losses * mask).mean()
 
     def _build_spike_jsonl_path(self) -> str:
         logger_cfg = self.cfg.runner.get("logger", {})
@@ -473,25 +489,13 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         actions = actions.to(torch.float32)
         actions = actions.to(self.device)
 
-        action_mask = None
         model_data = {"observation": observation, "actions": actions}
-        if self._is_openpi_real_world_joint():
-            action_mask = self._openpi_action_mask(actions)
-            model_data["action_mask"] = action_mask
 
         with self.amp_context:
             losses = self.model(
                 forward_type=ForwardType.SFT,
                 data=model_data,
             )
-
-        if (
-            self._is_openpi_real_world_joint()
-            and isinstance(losses, torch.Tensor)
-        ):
-            if action_mask is None:
-                action_mask = self._openpi_action_mask(actions)
-            return self._masked_openpi_loss(losses, action_mask)
 
         # train model return the loss
         return losses

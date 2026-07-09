@@ -3,22 +3,29 @@ set -euo pipefail
 
 export HYDRA_FULL_ERROR=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_PATH="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-export DREAMZERO_PATH=${DREAMZERO_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero}
-export PYTHONPATH="${REPO_PATH}:${DREAMZERO_PATH}:${PYTHONPATH:-}"
-export EMBODIED_PATH=${EMBODIED_PATH:-"${REPO_PATH}"}
+REPO_PATH="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+export EMBODIED_PATH=${EMBODIED_PATH:-"${REPO_PATH}/examples/embodiment"}
+export PYTHONPATH="${REPO_PATH}:${PYTHONPATH:-}"
+export OPENPI_DATA_HOME=${OPENPI_DATA_HOME:-"${REPO_PATH}/checkpoints/openpi_cache"}
 
 export USE_TF=0
 export TRANSFORMERS_NO_TF=1
 export USE_FLAX=0
+export TORCH_COMPILE_DISABLE=${TORCH_COMPILE_DISABLE:-1}
+export TORCHDYNAMO_DISABLE=${TORCHDYNAMO_DISABLE:-1}
 export TF_CPP_MIN_LOG_LEVEL=${TF_CPP_MIN_LOG_LEVEL:-3}
-export NO_ALBUMENTATIONS_UPDATE=1
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+
+# Avoid the NCCL NVLS path that fails on this cluster during OpenPI FSDP init.
+export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
+export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
+export NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}
 
 detect_num_gpus() {
   local detected
-  detected=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+  detected=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d " ")
   if [ -z "${detected}" ] || [ "${detected}" = "0" ]; then
     detected=8
   fi
@@ -26,41 +33,33 @@ detect_num_gpus() {
 }
 
 PET_NPROC_PER_NODE=${PET_NPROC_PER_NODE:-${NUM_GPUS:-$(detect_num_gpus)}}
-PET_NNODES=${PET_NNODES:-${NNODES:-1}}
+PET_NNODES=${PET_NNODES:-${NNODES:-4}}
 PET_NODE_RANK=${PET_NODE_RANK:-${NODE_RANK:-0}}
-MASTER_ADDR=${MASTER_ADDR:-${RAY_HEAD_ADDR:-${PET_MASTER_ADDR:-127.0.0.1}}}
-MASTER_PORT=${MASTER_PORT:-${RAY_HEAD_PORT:-${PET_MASTER_PORT:-6379}}}
+MASTER_ADDR=${MASTER_ADDR:-${RAY_HEAD_ADDR:-127.0.0.1}}
+MASTER_PORT=${MASTER_PORT:-${RAY_HEAD_PORT:-6379}}
 export PET_NPROC_PER_NODE PET_NNODES PET_NODE_RANK MASTER_ADDR MASTER_PORT
 
 NUM_GPUS=${NUM_GPUS:-${PET_NPROC_PER_NODE}}
 NNODES=${NNODES:-${PET_NNODES}}
 NODE_RANK=${NODE_RANK:-${PET_NODE_RANK}}
 export NUM_GPUS NNODES NODE_RANK
-CONFIG=${CONFIG:-real_world_franka_dual_dreamzero_sft_debug}
-export REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT:-/inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test_filtered_gop2}
-export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/results_franka_dual}
-export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_dreamzero_sft_arrange_vegetables_filtered}
-USER_GLOBAL_BATCH_SIZE_SET=${GLOBAL_BATCH_SIZE+x}
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
 
-require_global_lerobot_stats() {
-  local root="$1"
-  local stats_path="${root}/stats.json"
-  if [ ! -f "${stats_path}" ]; then
-    cat >&2 <<EOF
-[RLinf] ERROR: missing global LeRobot q01/q99 stats: ${stats_path}
-[RLinf] This script uses real_world_joint_norm_stats_mode=global_lerobot_q01_q99.
-[RLinf] Generate it before training, for example:
-[RLinf]   python toolkits/lerobot/write_global_lerobot_stats.py --root "${root}"
-EOF
-    exit 2
-  fi
-}
+CONFIG=${CONFIG:-real_world_franka_dual_openpi_pi05_sft}
+export REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT:-/inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test_new_filtered}
+export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_openpi_pi05_sft_arrange_vegetables_v6}
+export ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-float32}
+export MAX_STEPS=40000
+export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-${MAX_STEPS}}
+export GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-64}
+export LR=${LR:-1e-5}
+export LR_WARMUP_STEPS=${LR_WARMUP_STEPS:-2000}
 
-require_global_lerobot_stats "${REAL_WORLD_FRANKA_DUAL_ROOT}"
-
-ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-fp32}
-export ACTOR_MODEL_PRECISION
+if [ ! -f "${REAL_WORLD_FRANKA_DUAL_ROOT}/stats.json" ] || [ ! -f "${REAL_WORLD_FRANKA_DUAL_ROOT}/norm_stats.json" ]; then
+  echo "[RLinf] ERROR: ${REAL_WORLD_FRANKA_DUAL_ROOT} is missing stats.json or norm_stats.json." >&2
+  echo "[RLinf] Build or check the merged LeRobot dataset before training." >&2
+  exit 1
+fi
 
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
@@ -68,11 +67,7 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
 fi
 
 TOTAL_GPUS=$((NNODES * NUM_GPUS))
-DEFAULT_MICRO_BATCH_SIZE=$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))
-if [ "${DEFAULT_MICRO_BATCH_SIZE}" -lt 1 ]; then
-  DEFAULT_MICRO_BATCH_SIZE=1
-fi
-export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-${DEFAULT_MICRO_BATCH_SIZE}}
+export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))}
 RAY_PORT=${RAY_PORT:-${RAY_HEAD_PORT:-29500}}
 RAY_HEAD_ADDR=${RAY_HEAD_ADDR:-${MASTER_ADDR}}
 RAY_ADDRESS="${RAY_HEAD_ADDR}:${RAY_PORT}"
@@ -148,14 +143,9 @@ fi
 
 echo "[RLinf] NUM_GPUS=${NUM_GPUS} NNODES=${NNODES} NODE_RANK=${NODE_RANK} RAY_ADDRESS=${RAY_ADDRESS} ACTOR_PLACEMENT=${ACTOR_PLACEMENT} CONFIG=${CONFIG}"
 echo "[RLinf] REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT}"
-echo "[RLinf] precision override: actor.model.precision=${ACTOR_MODEL_PRECISION}"
+echo "[RLinf] OPENPI_DATA_HOME=${OPENPI_DATA_HOME}"
 echo "[RLinf] outputs: ${RUN_LOG_PATH}/${EXPERIMENT_NAME}/{tensorboard,checkpoints}"
-echo "[RLinf] global_batch_size=${GLOBAL_BATCH_SIZE} micro_batch_size=${MICRO_BATCH_SIZE} total_gpus=${TOTAL_GPUS}"
-
-if [ ! -f "${REAL_WORLD_FRANKA_DUAL_ROOT}/stats.json" ] || [ ! -f "${REAL_WORLD_FRANKA_DUAL_ROOT}/norm_stats.json" ]; then
-  echo "[RLinf] ERROR: ${REAL_WORLD_FRANKA_DUAL_ROOT} is missing stats.json or norm_stats.json." >&2
-  exit 1
-fi
+echo "[RLinf] max_steps=${MAX_STEPS} global_batch_size=${GLOBAL_BATCH_SIZE} micro_batch_size=${MICRO_BATCH_SIZE} total_gpus=${TOTAL_GPUS}"
 
 if [ "${RLINF_WAIT_FOR_RAY_GPUS:-1}" = "1" ]; then
   bash "${REPO_PATH}/ray_utils/check_ray.sh" "${TOTAL_GPUS}"
@@ -164,15 +154,23 @@ fi
 extra_args=(
   runner.logger.log_path="${RUN_LOG_PATH}"
   runner.logger.experiment_name="${EXPERIMENT_NAME}"
-  actor.model.precision="${ACTOR_MODEL_PRECISION}"
+  runner.max_steps="${MAX_STEPS}"
+  actor.optim.total_training_steps="${TOTAL_TRAINING_STEPS}"
+  actor.optim.lr="${LR}"
+  actor.optim.lr_warmup_steps="${LR_WARMUP_STEPS}"
+  actor.global_batch_size="${GLOBAL_BATCH_SIZE}"
   actor.micro_batch_size="${MICRO_BATCH_SIZE}"
+  actor.model.precision="${ACTOR_MODEL_PRECISION}"
+  actor.model.openpi.train_expert_only=False
 )
-if [ -n "${USER_GLOBAL_BATCH_SIZE_SET}" ]; then
-  extra_args+=(actor.global_batch_size="${GLOBAL_BATCH_SIZE}")
-fi
 if [ -n "${RESUME_DIR:-}" ]; then
   extra_args+=(runner.resume_dir="${RESUME_DIR}")
 fi
 
 cd "${REPO_PATH}"
-python examples/sft/train_vla_sft.py --config-name "${CONFIG}" cluster.num_nodes="${NNODES}" cluster.component_placement.actor="${ACTOR_PLACEMENT}" "${extra_args[@]}" "$@"
+python examples/sft/train_vla_sft.py \
+  --config-name "${CONFIG}" \
+  cluster.num_nodes="${NNODES}" \
+  cluster.component_placement.actor="${ACTOR_PLACEMENT}" \
+  "${extra_args[@]}" \
+  "$@"

@@ -85,6 +85,15 @@ def _format_prompt(prompt: str) -> str:
     return "A multi-view video shows that a robot " + instruction + LAYOUT_TEXT + instruction
 
 
+def _int_list(values: Any, *, name: str) -> list[int]:
+    if values is None:
+        return []
+    try:
+        return [int(value) for value in values]
+    except TypeError as exc:
+        raise ValueError(f"{name} must be a sequence of integers") from exc
+
+
 def _as_hwc_uint8_frames(value: Any, *, name: str) -> np.ndarray:
     arr = np.asarray(value)
     arr = np.squeeze(arr)
@@ -349,6 +358,7 @@ class FrankaDualDreamZeroRunner:
         if "executed_tiled_images" in block:
             frames = _as_hwc_uint8_frames(block["executed_tiled_images"], name="executed_tiled_images")
             if frames.shape[0] > 0:
+                self._validate_rollout_feedback(block, frames)
                 return frames, "executed_tiled_images"
         if "tiled_image" in block:
             return _as_hwc_uint8_frames(block["tiled_image"], name="tiled_image"), "tiled_image"
@@ -357,37 +367,77 @@ class FrankaDualDreamZeroRunner:
             return frames[-1:], "images_last_frame"
         raise ValueError(f"payload[{self.payload_key!r}] must include tiled_image or images")
 
+    def _validate_rollout_feedback(self, block: dict[str, Any], frames: np.ndarray) -> None:
+        feedback = block.get("rollout_feedback")
+        if not isinstance(feedback, dict):
+            raise ValueError("executed_tiled_images requires rollout_feedback metadata")
+
+        temporal_layout = block.get("temporal_layout")
+        if not isinstance(temporal_layout, dict):
+            temporal_layout = {}
+        expected_frames = int(
+            feedback.get(
+                "expected_executed_frames",
+                temporal_layout.get("runtime_rollout_feedback_frames", self.args.n_action_steps),
+            )
+        )
+        expected_keep = _int_list(
+            temporal_layout.get("runtime_rollout_keep_frame_numbers", [6, 12, 18, 24, 30, 36, 42, 48]),
+            name="runtime_rollout_keep_frame_numbers",
+        )
+        keep_numbers = _int_list(feedback.get("keep_frame_numbers"), name="rollout_feedback.keep_frame_numbers")
+        available_indices = _int_list(
+            feedback.get("available_keep_frame_indices"),
+            name="rollout_feedback.available_keep_frame_indices",
+        )
+        num_executed = int(feedback.get("num_executed_frames", 0))
+
+        if not bool(feedback.get("complete", False)):
+            raise ValueError(
+                "executed_tiled_images arrived before rollout feedback was complete: "
+                f"num_executed_frames={num_executed}, expected_executed_frames={expected_frames}"
+            )
+        if num_executed < expected_frames:
+            raise ValueError(
+                "rollout_feedback num_executed_frames is smaller than expected: "
+                f"{num_executed} < {expected_frames}"
+            )
+        if keep_numbers != expected_keep:
+            raise ValueError(
+                "rollout_feedback keep_frame_numbers do not match DreamZero training cadence: "
+                f"{keep_numbers} != {expected_keep}"
+            )
+        if frames.shape[0] != len(expected_keep):
+            raise ValueError(
+                "executed_tiled_images frame count does not match DreamZero feedback cadence: "
+                f"{frames.shape[0]} != {len(expected_keep)}"
+            )
+        expected_indices = [frame_number - 1 for frame_number in expected_keep]
+        if available_indices != expected_indices:
+            raise ValueError(
+                "rollout_feedback available_keep_frame_indices do not match expected executed-frame indices: "
+                f"{available_indices} != {expected_indices}"
+            )
+
     def build_model_input(self, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         block = _require_preprocessed_block(payload, self.payload_key)
         prompt = str(payload.get("prompt") or payload.get("task") or self.args.default_prompt)
         frames, frame_source = self._select_model_frames(block)
 
-        raw_state = np.asarray(block.get("state"), dtype=np.float32).reshape(-1)
-        if raw_state.size == 0:
-            raise ValueError(f"payload[{self.payload_key!r}][state] is required")
-        state = _pad_or_trim(raw_state, int(self.args.model_state_dim), dtype=np.float32)
-        state_raw_payload = block.get("state_raw")
+        state_raw_payload = block.get("state_raw", block.get("state"))
         state_raw = None
         if state_raw_payload is not None:
             state_raw = np.asarray(state_raw_payload, dtype=np.float32).reshape(-1)
 
-        mask_payload = block.get("state_mask")
-        if mask_payload is None:
-            raise ValueError(f"payload[{self.payload_key!r}][state_mask] is required")
-        state_mask = _pad_or_trim(mask_payload, int(self.args.model_state_dim), dtype=bool)
-        if not bool(np.any(state_mask)):
-            raise ValueError(f"payload[{self.payload_key!r}][state_mask] must contain at least one true entry")
-
-        action_mask_payload = block.get("action_mask")
-        if action_mask_payload is None:
-            raise ValueError(f"payload[{self.payload_key!r}][action_mask] is required")
-        action_mask_vec = _pad_or_trim(action_mask_payload, int(self.args.model_action_dim), dtype=bool)
-        if not bool(np.any(action_mask_vec)):
-            raise ValueError(f"payload[{self.payload_key!r}][action_mask] must contain at least one true entry")
-        action_mask = np.broadcast_to(
-            action_mask_vec[None, :],
+        # Current real-world policy variants intentionally disable
+        # proprioception. Keep the fixed model state tensor shape, but feed
+        # zeros rather than client joint/gripper values.
+        state = np.zeros((int(self.args.model_state_dim),), dtype=np.float32)
+        state_mask = np.zeros_like(state, dtype=bool)
+        action_mask = np.ones(
             (int(self.args.n_action_steps), int(self.args.model_action_dim)),
-        ).copy()
+            dtype=bool,
+        )
 
         positive, positive_mask = self._tokenize(_format_prompt(prompt))
         negative, negative_mask = self._tokenize(NEGATIVE_PROMPT)
@@ -418,6 +468,8 @@ class FrankaDualDreamZeroRunner:
             "state_raw_first16": None if state_raw is None else [float(x) for x in state_raw[:16]],
             "state_raw_stats": None if state_raw is None else _normalized_action_stats(state_raw),
             "action_true_dims": int(np.asarray(action_mask[0], dtype=bool).sum()),
+            "stats_source": block.get("stats_source"),
+            "stats_file": block.get("stats_file"),
             "returns_normalized_actions": True,
             "action_sampling": dict(self.sampling_metadata),
             "action_inference_mode": str(getattr(self.args, "action_inference_mode", "lazy")),
@@ -525,13 +577,6 @@ class FrankaDualDreamZeroRunner:
         dtype = torch.bfloat16
         state = action_input.state.to(device=device, dtype=dtype)
         embodiment_id = action_input.embodiment_id.to(device=device)
-        action_mask = action_input.action_mask.to(device=device, dtype=torch.bool)
-        if action_mask.ndim == 2:
-            action_mask = action_mask[None]
-        padded_action_mask = torch.zeros((batch_size, ah.action_horizon, ah.model.action_dim), device=device, dtype=torch.bool)
-        tdim = min(padded_action_mask.shape[1], action_mask.shape[1])
-        ddim = min(padded_action_mask.shape[2], action_mask.shape[2])
-        padded_action_mask[:, :tdim, :ddim] = action_mask[:, :tdim, :ddim]
 
         sample_scheduler_action = FlowUniPCMultistepScheduler(
             num_train_timesteps=ah.scheduler.num_train_timesteps,
@@ -545,7 +590,7 @@ class FrankaDualDreamZeroRunner:
             seed=ah.seed,
             device=str(device),
             dtype=dtype,
-        ).masked_fill(~padded_action_mask, 0.0)
+        )
         video_noise = ah.generate_noise(tuple(clean_latents.shape), seed=ah.seed, device=str(device), dtype=dtype)
         clean_btchw = clean_latents.transpose(1, 2).contiguous()
         noise_btchw = video_noise.transpose(1, 2).contiguous()
@@ -585,7 +630,6 @@ class FrankaDualDreamZeroRunner:
                 step_index=step_index,
                 return_dict=False,
             )[0]
-            action = action.masked_fill(~padded_action_mask, 0.0)
         return action
 
     @torch.inference_mode()

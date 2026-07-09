@@ -31,7 +31,6 @@ DEVICE=${DEVICE:-cuda:0}
 # generated sampling tensor to bf16, so bf16 serving can fail with
 # "mat1 and mat2 must have the same dtype".
 PRECISION=${PRECISION:-float32}
-N_ACTION_STEPS=${N_ACTION_STEPS:-48}
 RETURN_ACTION_DIM=${RETURN_ACTION_DIM:-16}
 NUM_STEPS=${NUM_STEPS:-5}
 NOISE_METHOD=${NOISE_METHOD:-flow_sde}
@@ -52,7 +51,6 @@ echo "[open_pi] HOST=${HOST}"
 echo "[open_pi] PORT=${PORT}"
 echo "[open_pi] DEVICE=${DEVICE}"
 echo "[open_pi] PRECISION=${PRECISION}"
-echo "[open_pi] N_ACTION_STEPS=${N_ACTION_STEPS}"
 echo "[open_pi] RETURN_ACTION_DIM=${RETURN_ACTION_DIM}"
 echo "[open_pi] NUM_STEPS=${NUM_STEPS}"
 echo "[open_pi] NOISE_METHOD=${NOISE_METHOD}"
@@ -66,7 +64,6 @@ echo "[open_pi] LOG_INPUT_OUTPUT=${LOG_INPUT_OUTPUT}"
   --precision "${PRECISION}" \
   --base-model-path "${BASE_MODEL_PATH}" \
   --checkpoint-path "${CHECKPOINT_PATH}" \
-  --n-action-steps "${N_ACTION_STEPS}" \
   --return-action-dim "${RETURN_ACTION_DIM}" \
   --num-steps "${NUM_STEPS}" \
   --noise-method "${NOISE_METHOD}" \

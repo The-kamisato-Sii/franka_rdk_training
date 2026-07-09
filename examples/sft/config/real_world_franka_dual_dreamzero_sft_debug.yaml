@@ -25,7 +25,7 @@ runner:
     experiment_name: "real_world_franka_dual_dreamzero_sft_arrange_vegetables"
     logger_backends: ["tensorboard"]
   max_epochs: -1
-  max_steps: 50000
+  max_steps: 100000
   val_check_interval: -1
   save_interval: 2000
   log_interval: 100
@@ -50,6 +50,7 @@ data:
   use_sam_scene_flow: false
   drop_motion_npy_file_cache: true
   real_world_joint_norm_stats_mode: global_lerobot_q01_q99
+  use_proprioception: false
   real_world_joint_max_tasks: null
   real_world_joint_max_tasks_per_tag: null
   real_world_joint_tags: [real_world_franka_dual]
@@ -129,7 +130,7 @@ actor:
           max_num_embodiments: 14
           num_frame_per_block: 2
           num_action_per_block: 48
-          num_state_per_block: 1
+          num_state_per_block: 0
           concat_first_frame_latent: false
         vae_cfg:
           _target_: groot.vla.model.dreamzero.modules.wan_video_vae.WanVideoVAE38
@@ -149,7 +150,7 @@ actor:
     lr_scheduler: "cosine"
     lr_warmup_steps: 1000
     lr_warmup_steps_ratio: 0.0
-    total_training_steps: 50000
+    total_training_steps: 100000
   fsdp_config:
     strategy: "fsdp2"
     use_orig_params: True

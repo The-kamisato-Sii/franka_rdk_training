@@ -25,22 +25,39 @@ detect_num_gpus() {
   echo "${detected}"
 }
 
-DETECTED_GPUS=$(detect_num_gpus)
-NUM_GPUS=${NUM_GPUS:-8}
-if [ "${NUM_GPUS}" -gt "${DETECTED_GPUS}" ]; then
-  echo "[RLinf] requested NUM_GPUS=${NUM_GPUS}, but only detected ${DETECTED_GPUS}; using detected value."
-  NUM_GPUS="${DETECTED_GPUS}"
-fi
-NNODES=1
-NODE_RANK=0
-MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-MASTER_PORT=${MASTER_PORT:-${RAY_HEAD_PORT:-6379}}
-export NUM_GPUS NNODES NODE_RANK MASTER_ADDR MASTER_PORT
+PET_NPROC_PER_NODE=${PET_NPROC_PER_NODE:-${NUM_GPUS:-$(detect_num_gpus)}}
+PET_NNODES=${PET_NNODES:-${NNODES:-1}}
+PET_NODE_RANK=${PET_NODE_RANK:-${NODE_RANK:-0}}
+MASTER_ADDR=${MASTER_ADDR:-${RAY_HEAD_ADDR:-${PET_MASTER_ADDR:-127.0.0.1}}}
+MASTER_PORT=${MASTER_PORT:-${RAY_HEAD_PORT:-${PET_MASTER_PORT:-6379}}}
+export PET_NPROC_PER_NODE PET_NNODES PET_NODE_RANK MASTER_ADDR MASTER_PORT
+
+NUM_GPUS=${NUM_GPUS:-${PET_NPROC_PER_NODE}}
+NNODES=${NNODES:-${PET_NNODES}}
+NODE_RANK=${NODE_RANK:-${PET_NODE_RANK}}
+export NUM_GPUS NNODES NODE_RANK
 CONFIG=${CONFIG:-real_world_franka_dual_dreamzero_sft}
 export REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT:-/inspire/qb-ilm2/project/robot-body/public/hairuoliu/franka_dual}
 export RUN_LOG_PATH=${RUN_LOG_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/RLinf/results_franka_dual}
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_franka_dual_dreamzero_sft}
-export GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
+USER_GLOBAL_BATCH_SIZE_SET=${GLOBAL_BATCH_SIZE+x}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
+
+require_global_lerobot_stats() {
+  local root="$1"
+  local stats_path="${root}/stats.json"
+  if [ ! -f "${stats_path}" ]; then
+    cat >&2 <<EOF
+[RLinf] ERROR: missing global LeRobot q01/q99 stats: ${stats_path}
+[RLinf] This script uses real_world_joint_norm_stats_mode=global_lerobot_q01_q99.
+[RLinf] Generate it before training, for example:
+[RLinf]   python toolkits/lerobot/write_global_lerobot_stats.py --root "${root}"
+EOF
+    exit 2
+  fi
+}
+
+require_global_lerobot_stats "${REAL_WORLD_FRANKA_DUAL_ROOT}"
 
 ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-fp32}
 export ACTOR_MODEL_PRECISION
@@ -50,8 +67,12 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   export CUDA_VISIBLE_DEVICES
 fi
 
-TOTAL_GPUS=${NUM_GPUS}
-export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))}
+TOTAL_GPUS=$((NNODES * NUM_GPUS))
+DEFAULT_MICRO_BATCH_SIZE=$((GLOBAL_BATCH_SIZE / TOTAL_GPUS))
+if [ "${DEFAULT_MICRO_BATCH_SIZE}" -lt 1 ]; then
+  DEFAULT_MICRO_BATCH_SIZE=1
+fi
+export MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-${DEFAULT_MICRO_BATCH_SIZE}}
 RAY_PORT=${RAY_PORT:-${RAY_HEAD_PORT:-29500}}
 RAY_HEAD_ADDR=${RAY_HEAD_ADDR:-${MASTER_ADDR}}
 RAY_ADDRESS="${RAY_HEAD_ADDR}:${RAY_PORT}"
@@ -60,32 +81,54 @@ RLINF_RUN_ID_SAFE=$(printf "%s" "${RLINF_RUN_ID}" | tr -c "[:alnum:]_.-" "_")
 RAY_DONE_FILE=${RAY_DONE_FILE:-"${REPO_PATH}/ray_utils/ray_done_${RLINF_RUN_ID_SAFE}"}
 export RLINF_NODE_RANK=${RLINF_NODE_RANK:-${NODE_RANK}}
 
-start_single_node_ray() {
+start_ray_for_rank() {
   if [ "${RLINF_START_RAY:-1}" != "1" ]; then
-    echo "[RLinf] RLINF_START_RAY=0: assuming local Ray is already started."
+    echo "[RLinf] RLINF_START_RAY=0: assuming Ray cluster is already started."
+    if [ "${NODE_RANK}" != "0" ]; then
+      echo "[RLinf] external Ray mode: driver runs only on node rank 0; exiting worker shell."
+      exit 0
+    fi
     return
   fi
 
   ray stop --force >/dev/null 2>&1 || true
-
   local ray_args=(--num-gpus="${NUM_GPUS}")
   if [ -n "${RAY_MEMORY_BYTES:-}" ]; then
     ray_args+=(--memory="${RAY_MEMORY_BYTES}")
   fi
 
-  rm -f "${RAY_DONE_FILE}"
-  local node_ip
-  node_ip=${RAY_NODE_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}
-  node_ip=${node_ip:-127.0.0.1}
-  RAY_HEAD_ADDR="${node_ip}"
-  RAY_ADDRESS="${RAY_HEAD_ADDR}:${RAY_PORT}"
-  echo "[RLinf] Starting single-node Ray: node_ip=${node_ip} port=${RAY_PORT} num_gpus=${NUM_GPUS}"
-  ray start --head --node-ip-address="${node_ip}" --port="${RAY_PORT}" --include-dashboard=false "${ray_args[@]}"
+  if [ "${NODE_RANK}" = "0" ]; then
+    rm -f "${RAY_DONE_FILE}"
+    local node_ip
+    node_ip=${RAY_NODE_IP:-$(hostname -I 2>/dev/null | cut -d " " -f 1)}
+    node_ip=${node_ip:-${RAY_HEAD_ADDR}}
+    echo "[RLinf] Starting Ray head: node_rank=${NODE_RANK} node_ip=${node_ip} port=${RAY_PORT}"
+    ray start --head --node-ip-address="${node_ip}" --port="${RAY_PORT}" --include-dashboard=false "${ray_args[@]}"
+  else
+    echo "[RLinf] Starting Ray worker: node_rank=${NODE_RANK} address=${RAY_ADDRESS}"
+    local started=0
+    for _ in $(seq 1 360); do
+      if ray start --address="${RAY_ADDRESS}" "${ray_args[@]}"; then
+        started=1
+        break
+      fi
+      sleep 2
+    done
+    if [ "${started}" != "1" ]; then
+      echo "[RLinf] ERROR: Ray worker node_rank=${NODE_RANK} failed to connect to ${RAY_ADDRESS}" >&2
+      exit 1
+    fi
+    while [ ! -f "${RAY_DONE_FILE}" ]; do
+      sleep 30
+    done
+    ray stop --force >/dev/null 2>&1 || true
+    exit 0
+  fi
 }
 
 finish_head() {
   local status=$?
-  if [ "${RLINF_START_RAY:-1}" = "1" ]; then
+  if [ "${NODE_RANK}" = "0" ] && [ "${RLINF_START_RAY:-1}" = "1" ]; then
     touch "${RAY_DONE_FILE}" 2>/dev/null || true
     if [ "${RLINF_STOP_RAY_ON_EXIT:-1}" = "1" ]; then
       ray stop --force >/dev/null 2>&1 || true
@@ -95,7 +138,7 @@ finish_head() {
 }
 trap finish_head EXIT
 
-start_single_node_ray
+start_ray_for_rank
 
 if [ "${TOTAL_GPUS}" = "1" ]; then
   ACTOR_PLACEMENT=${ACTOR_PLACEMENT:-0}
@@ -103,10 +146,11 @@ else
   ACTOR_PLACEMENT=${ACTOR_PLACEMENT:-0-$((TOTAL_GPUS - 1))}
 fi
 
-echo "[RLinf] single-node NUM_GPUS=${NUM_GPUS} RAY_ADDRESS=${RAY_ADDRESS} ACTOR_PLACEMENT=${ACTOR_PLACEMENT} CONFIG=${CONFIG}"
+echo "[RLinf] NUM_GPUS=${NUM_GPUS} NNODES=${NNODES} NODE_RANK=${NODE_RANK} RAY_ADDRESS=${RAY_ADDRESS} ACTOR_PLACEMENT=${ACTOR_PLACEMENT} CONFIG=${CONFIG}"
 echo "[RLinf] REAL_WORLD_FRANKA_DUAL_ROOT=${REAL_WORLD_FRANKA_DUAL_ROOT}"
 echo "[RLinf] precision override: actor.model.precision=${ACTOR_MODEL_PRECISION}"
 echo "[RLinf] outputs: ${RUN_LOG_PATH}/${EXPERIMENT_NAME}/{tensorboard,checkpoints}"
+echo "[RLinf] global_batch_size=${GLOBAL_BATCH_SIZE} micro_batch_size=${MICRO_BATCH_SIZE} total_gpus=${TOTAL_GPUS}"
 
 if [ "${RLINF_WAIT_FOR_RAY_GPUS:-1}" = "1" ]; then
   bash "${REPO_PATH}/ray_utils/check_ray.sh" "${TOTAL_GPUS}"
@@ -115,10 +159,12 @@ fi
 extra_args=(
   runner.logger.log_path="${RUN_LOG_PATH}"
   runner.logger.experiment_name="${EXPERIMENT_NAME}"
-  actor.global_batch_size="${GLOBAL_BATCH_SIZE}"
   actor.micro_batch_size="${MICRO_BATCH_SIZE}"
   actor.model.precision="${ACTOR_MODEL_PRECISION}"
 )
+if [ -n "${USER_GLOBAL_BATCH_SIZE_SET}" ]; then
+  extra_args+=(actor.global_batch_size="${GLOBAL_BATCH_SIZE}")
+fi
 if [ -n "${RESUME_DIR:-}" ]; then
   extra_args+=(runner.resume_dir="${RESUME_DIR}")
 fi

@@ -29,7 +29,10 @@ from groot.vla.data.schema import DatasetMetadata
 from torch.utils.data import Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from rlinf.data.datasets.dreamzero.sampling_strategy import MultiAnchorTemporalConfig
+from rlinf.data.datasets.dreamzero.sampling_strategy import (
+    EmptyTemporalSampleError,
+    MultiAnchorTemporalConfig,
+)
 from rlinf.utils.logging import get_logger
 
 logger = get_logger()
@@ -590,6 +593,15 @@ class _RobotWin2MotionMixin:
         for _ in range(self._bad_sample_resample_attempts):
             try:
                 return super().__getitem__(current_idx)
+            except EmptyTemporalSampleError as exc:
+                last_error = exc
+                logger.warning(
+                    "RoboTwin2 temporal sample failed at idx=%s under %s: %s",
+                    current_idx,
+                    self._root,
+                    exc,
+                )
+                current_idx = random.randint(0, max(0, len(self) - 1))
             except Exception as exc:
                 last_error = exc
                 if not self.include_motion:

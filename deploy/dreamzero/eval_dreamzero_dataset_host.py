@@ -144,10 +144,11 @@ def build_payload(
     executed_tiled_images: np.ndarray | None = None,
 ) -> dict[str, Any]:
     raw_state = np.asarray(row["observation.state"], dtype=np.float32).reshape(-1)[:16]
-    norm_state = normalize_q01_q99(raw_state, state_q01, state_q99)
-    state_pad, state_mask = pad_with_mask(norm_state, 64)
-    action_q01_pad, action_mask = pad_with_mask(action_q01, 32)
+    state_pad = np.zeros((64,), dtype=np.float32)
+    state_mask = np.zeros((64,), dtype=bool)
+    action_q01_pad, _ = pad_with_mask(action_q01, 32)
     action_q99_pad, _ = pad_with_mask(action_q99, 32)
+    action_mask = np.ones((32,), dtype=bool)
 
     block = {
         "tiled_image": tiled_image,

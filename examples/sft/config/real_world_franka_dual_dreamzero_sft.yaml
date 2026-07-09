@@ -48,6 +48,8 @@ data:
   motion_cache_size: 0
   scene_flow_training: false
   use_sam_scene_flow: false
+  real_world_joint_norm_stats_mode: global_lerobot_q01_q99
+  use_proprioception: false
   drop_motion_npy_file_cache: true
   real_world_joint_max_tasks: null
   real_world_joint_max_tasks_per_tag: null
@@ -128,7 +130,7 @@ actor:
           max_num_embodiments: 14
           num_frame_per_block: 2
           num_action_per_block: 48
-          num_state_per_block: 1
+          num_state_per_block: 0
           concat_first_frame_latent: false
         vae_cfg:
           _target_: groot.vla.model.dreamzero.modules.wan_video_vae.WanVideoVAE38
@@ -138,7 +140,7 @@ actor:
           vae_pretrained_path: ${actor.model.vae_pretrained_path}
 
   optim:
-    lr: 5.0e-5
+    lr: 1.0e-5
     value_lr: 1.55e-4
     adam_beta1: 0.95
     adam_beta2: 0.999

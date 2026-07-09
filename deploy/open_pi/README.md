@@ -48,7 +48,7 @@ not send the `payload["openpi"]` block, the request is rejected immediately.
 Response:
 
 ```python
-{"actions": np.ndarray}  # shape [n_action_steps, 16]
+{"actions": np.ndarray}  # shape [48, 16]
 ```
 
 The first 16 action dimensions are:
@@ -58,9 +58,9 @@ left_joint_positions_0..7 + right_joint_positions_0..7
 ```
 
 The OpenPI model internally uses the 32-d padded action/state format used during
-SFT. The server slices the normalized model output to 16 dims;
+SFT. The server always returns the full 48-step model horizon, sliced to 16 dims;
 `openpi_pi05_client` applies the action q01/q99 inverse before commanding the
-robot.
+robot, and decides how many leading actions to execute before replanning.
 
 Checkpoint note: this SFT run used FSDP with `sharding_strategy: no_shard`.
 Although the directory is named `local_shard_checkpoint`, each
@@ -92,6 +92,9 @@ SFT checkpoint:
 
 server:
   0.0.0.0:8000
+
+sampling:
+  NUM_STEPS=10
 ```
 
 The launch script sets `OPENPI_DATA_HOME` to the same cache path used by the
@@ -103,7 +106,7 @@ Common overrides:
 ```bash
 DEVICE=cuda:1 \
 PORT=8001 \
-N_ACTION_STEPS=48 \
+NUM_STEPS=10 \
 DEFAULT_PROMPT="fold the box" \
 bash deploy/open_pi/run_franka_dual_openpi_server.sh
 ```
@@ -141,9 +144,13 @@ python examples/convert_jax_model_to_pytorch.py \
   --config-name pi05_franka_dual_test \
   --output-path /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch \
   --precision float32
-mkdir -p /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_franka_dual
+mkdir -p \
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_franka_dual \
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_joint
 cp /inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test/norm_stats.json \
   /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_franka_dual/norm_stats.json
+cp /inspire/qb-ilm2/project/robot-body/public/bokai/franka_dual_test/norm_stats.json \
+  /inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch/real_world_joint/norm_stats.json
 '
 ```
 
@@ -152,8 +159,8 @@ Serve the converted directory as the base model and disable local-shard loading:
 ```bash
 BASE_MODEL_PATH=/inspire/hdd/project/robot-body/linbokai-CZXS24250037/results/openpi_official/pi05_franka_dual_test/pi05_franka_dual_test_20k/19999_pytorch \
 CHECKPOINT_PATH=none \
-N_ACTION_STEPS=48 \
 RETURN_ACTION_DIM=16 \
+NUM_STEPS=10 \
 bash deploy/open_pi/run_franka_dual_openpi_server.sh
 ```
 
@@ -203,7 +210,9 @@ On the `franka_rdk` machine, point its OpenPI client at this server:
 --policy.stats_task_id=fold_box
 ```
 
-`openpi_pi05_client` already sets `n_action_steps=48`,
-`execute_full_action_chunk=true`, `include_preprocessed_payload=true`,
+The server always returns the full 48-step normalized action chunk. The
+`openpi_pi05_client` controls receding-horizon execution with
+`n_action_steps` (24 by default, override with `POLICY_N_ACTION_STEPS=12` in
+the robot script), and already sets `include_preprocessed_payload=true`,
 `send_raw_compat_payload=false`, and `server_returns_normalized_actions=true`.
 It sends the `payload["openpi"]` block consumed by this server.

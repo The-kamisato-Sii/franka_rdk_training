@@ -104,7 +104,12 @@ def _forward_train(
             )
         action_features = self.action_encoder(action, timestep_action, action_embodiment_id)
         action_length = action_features.shape[1]
-        state_features = self.state_encoder(state, action_embodiment_id)
+        if state is not None and state.shape[1] > 0 and self.num_state_per_block > 0:
+            state_features = self.state_encoder(state, action_embodiment_id)
+        else:
+            state_features = action_features.new_empty(
+                action_features.shape[0], 0, action_features.shape[-1]
+            )
 
         if motion is not None and self.motion_patch_embedding is not None:
             m = motion.to(dtype=x.dtype)
@@ -121,16 +126,16 @@ def _forward_train(
                 grid_size=motion_grid_size,
                 start_motion_block=0,
             )
-            extra_register = torch.cat(
-                [motion_features, action_features, state_features],
-                dim=1,
-            )
+            register_parts = [motion_features, action_features]
         else:
             motion_features = None
             motion_length = 0
             self._motion_grid_size = None
             motion_freqs = None
-            extra_register = torch.cat([action_features, state_features], dim=1)
+            register_parts = [action_features]
+        if state_features.shape[1] > 0:
+            register_parts.append(state_features)
+        extra_register = torch.cat(register_parts, dim=1)
 
         action_register_length = extra_register.shape[1]
         x = torch.cat([x, extra_register], dim=1)
@@ -159,20 +164,25 @@ def _forward_train(
     if action is not None:
         assert timestep_action is not None
         assert state_features is not None
-        stride = timestep_action.shape[1] // state_features.shape[1]
-        timestep_state = timestep_action[:, ::stride]
+        if state_features.shape[1] > 0 and self.num_state_per_block > 0:
+            stride = timestep_action.shape[1] // state_features.shape[1]
+            timestep_state = timestep_action[:, ::stride]
+        else:
+            timestep_state = timestep_action.new_empty(
+                timestep_action.shape[0], 0
+            )
         if motion is not None and timestep_motion is not None and motion_length > 0:
             assert self._motion_grid_size is not None
             timestep_motion_exp = self._expand_motion_timestep_to_tokens(
                 timestep_motion=timestep_motion,
                 motion_grid_size=self._motion_grid_size,
             )
-            timestep = torch.cat(
-                [timestep, timestep_motion_exp, timestep_action, timestep_state],
-                dim=1,
-            )
+            timestep_parts = [timestep, timestep_motion_exp, timestep_action]
         else:
-            timestep = torch.cat([timestep, timestep_action, timestep_state], dim=1)
+            timestep_parts = [timestep, timestep_action]
+        if timestep_state.shape[1] > 0:
+            timestep_parts.append(timestep_state)
+        timestep = torch.cat(timestep_parts, dim=1)
 
     e = self.time_embedding(
         sinusoidal_embedding_1d(self.freq_dim, timestep.flatten()).type_as(x)

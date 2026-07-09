@@ -148,7 +148,7 @@ def torch_dtype_from_precision(
         return torch.bfloat16
     elif precision in [16, "16", "fp16", "16-mixed"]:
         return torch.float16
-    elif precision in [32, "32", "fp32", "32-true"]:
+    elif precision in [32, "32", "fp32", "float32", "float", "32-true"]:
         return torch.float32
     elif precision in [None, "null"]:
         return None
@@ -379,8 +379,11 @@ def validate_fsdp_cfg(cfg: DictConfig) -> DictConfig:
 
         all_none = param_dtype is None and reduce_dtype is None and buffer_dtype is None
 
+        fp32_values = {"fp32", "float32", "float", "32", "32-true"}
         all_fp32 = (
-            param_dtype == "fp32" and reduce_dtype == "fp32" and buffer_dtype == "fp32"
+            str(param_dtype).lower() in fp32_values
+            and str(reduce_dtype).lower() in fp32_values
+            and str(buffer_dtype).lower() in fp32_values
         )
 
         use_fsdp_mixed_precision = not (all_none or all_fp32)

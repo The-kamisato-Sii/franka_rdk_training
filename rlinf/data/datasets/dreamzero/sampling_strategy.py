@@ -123,11 +123,6 @@ def _video_frames_per_chunk(cfg: MultiAnchorTemporalConfig) -> int:
     return len(cfg.video_in_chunk_offsets)
 
 
-def _video_max_anchor_extent(cfg: MultiAnchorTemporalConfig) -> int:
-    """Max relative frame index covered by one anchor (video + action span)."""
-    return max(max(cfg.video_in_chunk_offsets), cfg.action_horizon - 1)
-
-
 def _video_micro_stride(cfg: MultiAnchorTemporalConfig) -> int:
     offsets = cfg.video_in_chunk_offsets
     if len(offsets) < 2:
@@ -145,6 +140,31 @@ def _video_micro_stride(cfg: MultiAnchorTemporalConfig) -> int:
     return step
 
 
+def _full_macro_window_extent(cfg: MultiAnchorTemporalConfig) -> int:
+    """Max relative frame index needed by a complete macro chunk.
+
+    DreamZero/WMAM video chunks include a boundary frame after the last sampled
+    in-chunk frame. For the default offsets ``0,6,...,42`` this means a full
+    chunk anchored at ``t`` requires frame ``t+48`` as well as actions
+    ``t..t+47``.
+    """
+    return max(
+        max(cfg.video_in_chunk_offsets) + _video_micro_stride(cfg),
+        cfg.action_horizon - 1,
+    )
+
+
+def _has_full_macro_window(
+    anchor_index: int,
+    trajectory_length: int,
+    cfg: MultiAnchorTemporalConfig,
+) -> bool:
+    return (
+        0 <= anchor_index
+        and anchor_index + _full_macro_window_extent(cfg) < trajectory_length
+    )
+
+
 def sample_video_indices(
     first_idx: int,
     language_annotations: np.ndarray,
@@ -159,12 +179,11 @@ def sample_video_indices(
     frames_per_chunk = _video_frames_per_chunk(cfg)
     max_frames = frames_per_chunk * cfg.max_chunk_size + 1
     per_step_offsets = list(cfg.video_in_chunk_offsets)
-    max_anchor_extent = _video_max_anchor_extent(cfg)
     boundary_stride = _video_micro_stride(cfg)
     sampled_list: list[int] = []
 
     def add_step_set(anchor_index: int) -> None:
-        if anchor_index < 0 or anchor_index + max_anchor_extent >= trajectory_length:
+        if not _has_full_macro_window(anchor_index, trajectory_length, cfg):
             return
         if len(sampled_list) + len(per_step_offsets) > max_frames:
             return
@@ -238,7 +257,7 @@ def sample_action_indices(
     sampled_list: list[int] = []
 
     def add_step_set(anchor_index: int) -> None:
-        if anchor_index < 0 or anchor_index + cfg.action_horizon >= trajectory_length:
+        if not _has_full_macro_window(anchor_index, trajectory_length, cfg):
             return
         if len(sampled_list) + cfg.action_horizon > max_frames:
             return
@@ -310,7 +329,7 @@ def sample_state_indices(
             return
         if target_num_chunks is not None and len(sampled_list) >= target_num_chunks:
             return
-        if 0 <= anchor_index and anchor_index + cfg.macro_stride < trajectory_length:
+        if _has_full_macro_window(anchor_index, trajectory_length, cfg):
             sampled_list.append(int(anchor_index))
 
     add_anchor(first_idx)
@@ -378,6 +397,20 @@ def sample_temporal_indices(
     )
 
 
+def _video_anchor_indices(temporal: TemporalIndices, cfg: MultiAnchorTemporalConfig) -> np.ndarray:
+    frames_per_chunk = _video_frames_per_chunk(cfg)
+    expected = int(temporal.num_video_chunks) * frames_per_chunk
+    if expected <= 0 or temporal.video.size < expected:
+        return np.array([], dtype=np.int64)
+    return temporal.video[:expected].reshape(temporal.num_video_chunks, frames_per_chunk)[:, 0]
+
+
+def _action_anchor_indices(temporal: TemporalIndices, cfg: MultiAnchorTemporalConfig) -> np.ndarray:
+    if temporal.action.size == 0 or temporal.action.size % cfg.action_horizon != 0:
+        return np.array([], dtype=np.int64)
+    return temporal.action.reshape(-1, cfg.action_horizon)[:, 0]
+
+
 def require_multi_anchor_temporal_indices(
     frame_in_ep: int,
     language_annotations: np.ndarray,
@@ -419,6 +452,19 @@ def require_multi_anchor_temporal_indices(
             f"Inconsistent multi-anchor state span at frame {frame_in_ep} "
             f"episode {ep}: state.size={temporal.state.size}, "
             f"expected {cfg.max_chunk_size}"
+        )
+    video_anchors = _video_anchor_indices(temporal, cfg)
+    action_anchors = _action_anchor_indices(temporal, cfg)
+    state_anchors = temporal.state.astype(np.int64, copy=False)
+    if not (
+        np.array_equal(video_anchors, action_anchors)
+        and np.array_equal(action_anchors, state_anchors)
+    ):
+        ep = episode_index if episode_index is not None else "?"
+        raise EmptyTemporalSampleError(
+            f"Misaligned multi-anchor temporal window at frame {frame_in_ep} "
+            f"episode {ep}: video_anchors={video_anchors.tolist()}, "
+            f"action_anchors={action_anchors.tolist()}, state_anchors={state_anchors.tolist()}"
         )
     return temporal
 

@@ -73,7 +73,7 @@ def _load_model(
                 "num_images_in_input": 3,
                 "train_expert_only": True,
                 "action_chunk": 48,
-                "num_steps": 5,
+                "num_steps": 10,
                 "noise_method": "flow_sde",
                 "noise_level": 0.5,
                 "action_env_dim": 32,
@@ -156,11 +156,8 @@ def _unnormalize_actions(x: torch.Tensor, q01: torch.Tensor, q99: torch.Tensor) 
     return (x + 1.0) * 0.5 * (q99 - q01 + 1e-6) + q01
 
 
-def _masked_initial_noise(shape: tuple[int, ...], device: torch.device, real_dim: int) -> torch.Tensor:
-    noise = torch.randn(shape, device=device, dtype=torch.float32)
-    if real_dim < shape[-1]:
-        noise[..., real_dim:] = 0.0
-    return noise
+def _initial_noise(shape: tuple[int, ...], device: torch.device) -> torch.Tensor:
+    return torch.randn(shape, device=device, dtype=torch.float32)
 
 
 def _evaluate_one_checkpoint(
@@ -203,7 +200,7 @@ def _evaluate_one_checkpoint(
             obs_dict = tree_map(lambda x: _move_to_device(x, device), batch)
             observation = _model.Observation.from_dict(obs_dict)
 
-            noise = _masked_initial_noise(tuple(actions.shape), device, real_dim)
+            noise = _initial_noise(tuple(actions.shape), device)
             outputs = model.sample_actions(
                 observation,
                 noise=noise,
@@ -346,7 +343,7 @@ def main() -> None:
         "seed": int(args.seed),
         "indices_head": indices[:20].tolist(),
         "real_action_dim": int(args.real_action_dim),
-        "noise_policy": "initial noise is N(0,1) for dims [0:16), zero for dims [16:32)",
+        "noise_policy": "initial noise is N(0,1) for all 32 model action dims, matching deploy/open_pi server",
         "metrics": {},
     }
 
