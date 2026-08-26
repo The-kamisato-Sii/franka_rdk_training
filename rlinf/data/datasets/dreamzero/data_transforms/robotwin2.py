@@ -25,6 +25,7 @@ from groot.vla.data.transform.state_action import (
     StateActionTransform,
 )
 from groot.vla.data.transform.video import (
+    RobotWinVideoResizeTile,
     VideoColorJitter,
     VideoCrop,
     VideoResize,
@@ -56,6 +57,9 @@ MOTION_KEYS = ["motion.point_map", "motion.scene_flow"]
 LANGUAGE_KEYS = ["annotation.language.action_text"]
 
 _VIDEO_BACKEND = "torchvision"
+_LEGACY_MULTIVIEW_LAYOUT = "head_top_wrists_bottom"
+_ASYMMETRIC_MULTIVIEW_LAYOUT = "head_left_wrists_right_vertical"
+_ASYMMETRIC_COMPOSITE_KEY = "video.robotwin_composite"
 _TRAINING_PROMPT_PREFIX = "A multi-view video shows that a dual-arm robot "
 _MULTIVIEW_LAYOUT = (
     " The video is split into three views: The top view shows the overhead "
@@ -109,10 +113,30 @@ class RobotWin2DataTransform:
         return concat_images
 
     @staticmethod
-    def get_modality_config() -> dict[str, ModalityConfig]:
+    def get_modality_config(
+        action_horizon: int = DEFAULT_ACTION_HORIZON,
+        video_delta_indices: list[int] | tuple[int, ...] | None = None,
+        motion_downsample_ratio: int = 1,
+    ) -> dict[str, ModalityConfig]:
+        """Build the modality contract without baking in a 48-step horizon.
+
+        Registry callers use the legacy defaults. Export/debug callers can pass
+        the resolved training schedule (including non-uniform video offsets).
+        """
+        action_horizon = int(action_horizon)
+        motion_downsample_ratio = int(motion_downsample_ratio)
+        if action_horizon <= 0 or motion_downsample_ratio <= 0:
+            raise ValueError(
+                "action_horizon and motion_downsample_ratio must be positive, "
+                f"got {action_horizon}, {motion_downsample_ratio}"
+            )
+        if video_delta_indices is None:
+            video_delta_indices = list(range(action_horizon + 1))
+        else:
+            video_delta_indices = [int(index) for index in video_delta_indices]
         return {
             "video": ModalityConfig(
-                delta_indices=list(range(49)),
+                delta_indices=list(video_delta_indices),
                 eval_delta_indices=[0],
                 modality_keys=list(VIDEO_KEYS),
             ),
@@ -121,11 +145,13 @@ class RobotWin2DataTransform:
                 modality_keys=list(STATE_KEYS),
             ),
             "action": ModalityConfig(
-                delta_indices=list(range(48)),
+                delta_indices=list(range(action_horizon)),
                 modality_keys=list(ACTION_KEYS),
             ),
             "motion": ModalityConfig(
-                delta_indices=list(range(48)),
+                delta_indices=list(
+                    range(0, action_horizon, motion_downsample_ratio)
+                ),
                 eval_delta_indices=[0],
                 modality_keys=list(MOTION_KEYS),
             ),
@@ -147,6 +173,50 @@ class RobotWin2DataTransform:
             if cfg.get("action_head_cfg", None) is not None
             else False
         )
+        target_video_height = int(cfg.get("target_video_height", 256))
+        target_video_width = int(cfg.get("target_video_width", 320))
+        multiview_layout = str(
+            cfg.get("robotwin_multiview_layout", _LEGACY_MULTIVIEW_LAYOUT)
+        )
+        if multiview_layout == _LEGACY_MULTIVIEW_LAYOUT:
+            if target_video_height % 2 != 0 or target_video_width % 2 != 0:
+                raise ValueError(
+                    "RoboTwin2's legacy 2x2 layout requires even target video "
+                    f"dimensions, got {target_video_height}x{target_video_width}."
+                )
+            head_view_height = target_video_height // 2
+            head_view_width = target_video_width // 2
+            wrist_view_height = target_video_height // 2
+            wrist_view_width = target_video_width // 2
+        elif multiview_layout == _ASYMMETRIC_MULTIVIEW_LAYOUT:
+            head_view_height = int(cfg.get("robotwin_head_view_height", 480))
+            head_view_width = int(cfg.get("robotwin_head_view_width", 512))
+            wrist_view_height = int(cfg.get("robotwin_wrist_view_height", 240))
+            wrist_view_width = int(cfg.get("robotwin_wrist_view_width", 320))
+            expected_height = head_view_height
+            expected_width = head_view_width + wrist_view_width
+            if head_view_height != 2 * wrist_view_height:
+                raise ValueError(
+                    "RoboTwin asymmetric layout requires head height to equal "
+                    "two wrist heights; got "
+                    f"head={head_view_height}, wrist={wrist_view_height}."
+                )
+            if (target_video_height, target_video_width) != (
+                expected_height,
+                expected_width,
+            ):
+                raise ValueError(
+                    "RoboTwin asymmetric view sizes do not match the configured "
+                    "composite: target="
+                    f"{target_video_height}x{target_video_width}, expected="
+                    f"{expected_height}x{expected_width}."
+                )
+        else:
+            raise ValueError(
+                "Unsupported robotwin_multiview_layout "
+                f"{multiview_layout!r}; expected {_LEGACY_MULTIVIEW_LAYOUT!r} "
+                f"or {_ASYMMETRIC_MULTIVIEW_LAYOUT!r}."
+            )
         return RobotWin2DataTransform._build_composed_transform(
             tokenizer_path=tokenizer_path,
             state_horizon=int(cfg.get("state_horizon", 1)),
@@ -165,6 +235,17 @@ class RobotWin2DataTransform:
             ),
             embodiment_tag_mapping=dict(embodiment_tag_mapping),
             include_motion=include_motion,
+            multiview_layout=multiview_layout,
+            head_view_height=head_view_height,
+            head_view_width=head_view_width,
+            wrist_view_height=wrist_view_height,
+            wrist_view_width=wrist_view_width,
+            arm_normalization_mode=str(
+                cfg.get("arm_normalization_mode", "min_max")
+            ),
+            gripper_normalization_mode=str(
+                cfg.get("gripper_normalization_mode", "binary")
+            ),
         )
 
     @staticmethod
@@ -180,6 +261,13 @@ class RobotWin2DataTransform:
         always_use_default_instruction: bool,
         embodiment_tag_mapping: dict[str, int],
         include_motion: bool,
+        multiview_layout: str,
+        head_view_height: int,
+        head_view_width: int,
+        wrist_view_height: int,
+        wrist_view_width: int,
+        arm_normalization_mode: str = "min_max",
+        gripper_normalization_mode: str = "binary",
     ) -> ComposedModalityTransform:
         vk = list(VIDEO_KEYS)
         state_k = list(STATE_KEYS)
@@ -187,50 +275,74 @@ class RobotWin2DataTransform:
         transforms: list[Any] = [
             VideoToTensor(apply_to=vk, backend=_VIDEO_BACKEND),
             VideoCrop(apply_to=vk, backend=_VIDEO_BACKEND, scale=0.95),
-            VideoResize(
-                apply_to=vk,
-                backend=_VIDEO_BACKEND,
-                height=128,
-                width=160,
-                interpolation="linear",
-            ),
+        ]
+        if multiview_layout == _ASYMMETRIC_MULTIVIEW_LAYOUT:
+            transforms.append(
+                RobotWinVideoResizeTile(
+                    apply_to=vk,
+                    output_key=_ASYMMETRIC_COMPOSITE_KEY,
+                    head_height=head_view_height,
+                    head_width=head_view_width,
+                    wrist_height=wrist_view_height,
+                    wrist_width=wrist_view_width,
+                    interpolation="linear",
+                )
+            )
+            transformed_video_keys = [_ASYMMETRIC_COMPOSITE_KEY]
+        else:
+            transforms.append(
+                VideoResize(
+                    apply_to=vk,
+                    backend=_VIDEO_BACKEND,
+                    height=head_view_height,
+                    width=head_view_width,
+                    interpolation="linear",
+                )
+            )
+            transformed_video_keys = vk
+        transforms.extend(
+            [
             VideoColorJitter(
-                apply_to=vk,
+                apply_to=transformed_video_keys,
                 backend=_VIDEO_BACKEND,
                 brightness=0.3,
                 contrast=0.4,
                 saturation=0.5,
                 hue=0.08,
             ),
-            VideoToNumpy(apply_to=vk, backend=_VIDEO_BACKEND),
+            VideoToNumpy(
+                apply_to=transformed_video_keys,
+                backend=_VIDEO_BACKEND,
+            ),
             StateActionToTensor(apply_to=state_k),
             StateActionTransform(
                 apply_to=state_k,
                 normalization_modes={
-                    "state.left_arm": "min_max",
-                    "state.left_gripper": "binary",
-                    "state.right_arm": "min_max",
-                    "state.right_gripper": "binary",
+                    "state.left_arm": arm_normalization_mode,
+                    "state.left_gripper": gripper_normalization_mode,
+                    "state.right_arm": arm_normalization_mode,
+                    "state.right_gripper": gripper_normalization_mode,
                 },
             ),
             StateActionToTensor(apply_to=action_k),
             StateActionTransform(
                 apply_to=action_k,
                 normalization_modes={
-                    "action.left_arm": "min_max",
-                    "action.left_gripper": "binary",
-                    "action.right_arm": "min_max",
-                    "action.right_gripper": "binary",
+                    "action.left_arm": arm_normalization_mode,
+                    "action.left_gripper": gripper_normalization_mode,
+                    "action.right_arm": arm_normalization_mode,
+                    "action.right_gripper": gripper_normalization_mode,
                 },
             ),
-        ]
+            ]
+        )
         if include_motion:
             transforms.append(StateActionToTensor(apply_to=list(MOTION_KEYS)))
         transforms.extend(
             [
                 ConcatTransform(
                     apply_to=[],
-                    video_concat_order=vk,
+                    video_concat_order=transformed_video_keys,
                     state_concat_order=state_k,
                     action_concat_order=action_k,
                 ),
@@ -245,8 +357,19 @@ class RobotWin2DataTransform:
                     action_horizon=action_horizon,
                     tokenizer_path=tokenizer_path,
                     embodiment_tag_mapping=embodiment_tag_mapping,
-                    num_views=3,
+                    num_views=len(transformed_video_keys),
                 ),
             ]
         )
         return ComposedModalityTransform(transforms=transforms)
+
+
+class RobotWinDataTransform(RobotWin2DataTransform):
+    """Native RoboTwin absolute-EEF transform.
+
+    It shares the three-view/state layout with the legacy ``robotwin2`` QPOS
+    dataset while selecting DreamZero's native RoboTwin embodiment projector.
+    """
+
+    TAG = "robotwin"
+    DEFAULT_TAG_MAPPING = {"robotwin": 0}
