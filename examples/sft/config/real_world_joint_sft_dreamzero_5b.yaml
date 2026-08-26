@@ -41,6 +41,9 @@ data:
   parquet_cache_size: 1
   video_backend: torchcodec # LeRobot video decoder: pyav | torchcodec
   video_in_chunk_offsets: [0, 6, 12, 18, 24, 30, 36, 42]
+  # Preserve the normalization used by the validated joint pretraining run.
+  # This heterogeneous 13-embodiment mixture has no compatible root stats.json.
+  real_world_joint_norm_stats_mode: task_lerobot_q01_q99
   real_world_joint_max_tasks: null
   real_world_joint_max_tasks_per_tag: null
   real_world_joint_tags: null
