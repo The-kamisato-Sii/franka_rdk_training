@@ -1211,16 +1211,6 @@ class _RealWorldJointMotionMixin:
             self._cumulative = np.cumsum(self._ep_frames)
             self._total_frames = int(self._cumulative[-1])
 
-    def _temporal_offsets_for_frame(
-        self, frame_in_ep: int, episode_index: int, ep_len: int
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        video, state, action = super()._temporal_offsets_for_frame(
-            frame_in_ep, episode_index, ep_len
-        )
-        if getattr(self, "sampling_mode", None) == "multi_anchor":
-            anchor = int(frame_in_ep)
-            return video - anchor, state - anchor, action - anchor
-        return video, state, action
 
     def _warn_bad_episode_once(self, episode_index: int | None, exc: Exception) -> None:
         """同一个坏 episode 只打印一次 warning，避免日志刷屏。"""

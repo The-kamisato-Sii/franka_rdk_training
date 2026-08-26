@@ -6,6 +6,10 @@ import unittest
 
 import numpy as np
 
+from rlinf.data.datasets.dreamzero.real_world_joint import (
+    _RealWorldJointMotionMixin,
+)
+
 from rlinf.data.datasets.dreamzero.sampling_strategy import (
     MultiAnchorTemporalConfig,
     require_multi_anchor_temporal_indices,
@@ -80,6 +84,32 @@ class DreamZeroTemporalSamplingTest(unittest.TestCase):
             temporal.action, np.arange(16, dtype=np.int64)
         )
         np.testing.assert_array_equal(temporal.state, np.asarray([0]))
+
+    def test_real_world_joint_preserves_relative_multi_anchor_offsets(self) -> None:
+        class _FakeBaseDataset:
+            def _temporal_offsets_for_frame(
+                self, frame_in_ep: int, episode_index: int, ep_len: int
+            ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                del frame_in_ep, episode_index, ep_len
+                return (
+                    np.asarray([-96, -48, 0, 48, 96]),
+                    np.asarray([-96, -48, 0, 48]),
+                    np.arange(-96, 96, dtype=np.int64),
+                )
+
+        class _FakeRealWorldDataset(_RealWorldJointMotionMixin, _FakeBaseDataset):
+            pass
+
+        dataset = object.__new__(_FakeRealWorldDataset)
+        video, state, action = dataset._temporal_offsets_for_frame(
+            frame_in_ep=1952, episode_index=19, ep_len=2510
+        )
+
+        np.testing.assert_array_equal(video, [-96, -48, 0, 48, 96])
+        np.testing.assert_array_equal(state, [-96, -48, 0, 48])
+        np.testing.assert_array_equal(
+            action, np.arange(-96, 96, dtype=np.int64)
+        )
 
     def test_motion_flow_extent_never_selects_zero_padded_tail(self) -> None:
         cfg = MultiAnchorTemporalConfig(
