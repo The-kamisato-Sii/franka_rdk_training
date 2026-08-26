@@ -33,13 +33,14 @@ runner:
 
 data:
   dataset_type: real_world_joint
-  train_data_paths: ${oc.env:REAL_WORLD_DATA_ROOT,/inspire/qb-ilm2/project/robot-body/public/real_world_data_dreamzero}
+  train_data_paths: ${oc.env:REAL_WORLD_DATA_ROOT,/inspire/qb-ilm2/project/robot-body/public/real_world_data_dreamzero_motion_v2}
   real_world_joint_root: ${data.train_data_paths}
-  num_workers: 2
+  num_workers: 4
   prefetch_factor: 1
   pin_memory: true
+  parquet_cache_size: 1
   video_backend: torchcodec # LeRobot video decoder: pyav | torchcodec
-  motion_downsample_ratio: 6
+  video_in_chunk_offsets: [0, 6, 12, 18, 24, 30, 36, 42]
   real_world_joint_max_tasks: null
   real_world_joint_max_tasks_per_tag: null
   real_world_joint_tags: null
@@ -50,7 +51,7 @@ data:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 16
+  micro_batch_size: 32
   global_batch_size: 1024
   seed: 42
 
@@ -132,7 +133,7 @@ actor:
     adam_beta2: 0.999
     adam_eps: 1.0e-08
     weight_decay: 1.0e-5
-    clip_grad: 0.5
+    clip_grad: 1.0
     lr_scheduler: "cosine"
     lr_warmup_steps: -1
     lr_warmup_steps_ratio: 0.05
@@ -147,7 +148,7 @@ actor:
     backward_prefetch: "pre"
     reshard_after_forward: False
     checkpoint_format: local_shard
-    save_full_model_weights: False
+    save_full_model_weights: True
     grad_scaler:
       enabled: False
     mixed_precision:

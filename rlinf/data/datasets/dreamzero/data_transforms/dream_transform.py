@@ -22,6 +22,8 @@ import numpy as np
 from einops import rearrange
 from groot.vla.model.dreamzero.transform.dreamzero_cotrain import (
     DreamTransform as DreamTransformBase,
+)
+from groot.vla.model.dreamzero.transform.dreamzero_cotrain import (
     HuggingfaceTokenizer,
 )
 
@@ -114,3 +116,25 @@ class DreamTransform(DreamTransformBase):
         if images.shape[0] > 1:
             return concat_multiview_video(self.embodiment_tag, images)
         return images
+
+    def apply_single(self, data: dict) -> dict:
+        """Preserve RoboTwin motion branch-validity masks through Groot transform."""
+        transformed = super().apply_single(data)
+        motion_length = None
+        if "motion.point_map" in data:
+            motion_length = int(data["motion.point_map"].shape[0])
+        for source_key, output_key in (
+            ("motion.point_valid_mask", "motion_point_valid_mask"),
+            ("motion.flow_valid_mask", "motion_flow_valid_mask"),
+        ):
+            if source_key not in data:
+                continue
+            mask = np.asarray(data[source_key], dtype=bool)
+            if mask.ndim != 1 or (
+                motion_length is not None and int(mask.shape[0]) != motion_length
+            ):
+                raise ValueError(
+                    f"{source_key} must have shape ({motion_length},), got {mask.shape}"
+                )
+            transformed[output_key] = mask
+        return transformed

@@ -135,6 +135,12 @@ class Cluster:
         "PKG_CONFIG_PATH",
         "CPATH",
     }
+    RAY_INIT_ENV_KEYS = (
+        "PATH",
+        "PYTHONPATH",
+        "CUDA_VISIBLE_DEVICES",
+        "RAY_ADDRESS",
+    )
 
     class NamespaceConflictError(Exception):
         """Raised when there is a namespace conflict in Ray initialization."""
@@ -318,6 +324,15 @@ class Cluster:
         self._ray_code_sync_fragment, self._runtime_code_sync_strip_roots = (
             Cluster._prepare_ray_code_sync_runtime_env_fragment()
         )
+        filtered_env_specific = {
+            key: os.environ[key]
+            for key in Cluster.RAY_INIT_ENV_KEYS
+            if key in os.environ
+        }
+        ray_job_runtime_env = Cluster._combine_ray_runtime_env(
+            self._ray_code_sync_fragment,
+            {"env_vars": filtered_env_specific},
+        )
 
         try:
             # First try to connect to an existing Ray cluster
@@ -325,9 +340,9 @@ class Cluster:
                 "address": "auto",
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
+                "runtime_env": ray_job_runtime_env,
             }
             if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
                 py_mods = ray_init_kwargs["runtime_env"].get("py_modules") or ()
                 self._logger.info(
                     "%s Ray code sync is enabled (py_modules=%r); workers receive "
@@ -341,9 +356,8 @@ class Cluster:
             ray_init_kwargs = {
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
+                "runtime_env": ray_job_runtime_env,
             }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
             ray.init(**ray_init_kwargs)
 
         # Ray log collector
@@ -657,8 +671,8 @@ class Cluster:
         node_group = self.get_node_group(node_group_label)
         remote_cls = ray.remote(cls)
 
-        merged_env_vars = node.env_vars.copy()
-        path_env_merge_mode = self.get_path_env_merge_mode(merged_env_vars)
+        path_env_merge_mode = self.get_path_env_merge_mode(node.env_vars)
+        merged_env_vars = self._filter_kubernetes_service_env_vars(node.env_vars)
         # Update with user-specified env vars in node group configs
         cfg_node_env_vars = node_group.get_node_env_vars(node_rank)
         merged_env_vars = self.merge_worker_env_vars(
@@ -766,6 +780,40 @@ class Cluster:
             else:
                 merged[key] = value
         return merged
+
+    @staticmethod
+    def _filter_kubernetes_service_env_vars(
+        env_vars: dict[str, str],
+    ) -> dict[str, str]:
+        """Remove Kubernetes ServiceLink variables from Ray worker environments.
+
+        Kubernetes injects one ``*_SERVICE_*`` and many ``*_PORT_*`` variables
+        for every visible Service. Passing thousands of these through Ray's
+        serialized runtime environment can exceed the OS argument-size limit.
+        Explicit node-group and worker variables are merged after this filter.
+        """
+        service_prefixes: set[str] = set()
+        for key in env_vars:
+            if not key.endswith("_SERVICE_HOST"):
+                continue
+            prefix = key[: -len("_SERVICE_HOST")]
+            if f"{prefix}_SERVICE_PORT" in env_vars:
+                service_prefixes.add(prefix)
+
+        if not service_prefixes:
+            return dict(env_vars)
+
+        filtered: dict[str, str] = {}
+        for key, value in env_vars.items():
+            is_service_link = any(
+                key.startswith(f"{prefix}_SERVICE_")
+                or key == f"{prefix}_PORT"
+                or key.startswith(f"{prefix}_PORT_")
+                for prefix in service_prefixes
+            )
+            if not is_service_link:
+                filtered[key] = value
+        return filtered
 
     @staticmethod
     def _split_path_entries(path_value: Optional[str]) -> list[str]:

@@ -691,6 +691,28 @@ def test_merge_path_like_env_value_ignores_non_whitelisted_env_var():
     assert merged == "http://new.proxy:8080"
 
 
+def test_filter_kubernetes_service_env_vars_keeps_training_ports():
+    env_vars = {
+        "PATH": "/usr/bin",
+        "MASTER_PORT": "29500",
+        "RAY_HEAD_PORT": "6379",
+        "EXAMPLE_SERVICE_HOST": "10.96.0.1",
+        "EXAMPLE_SERVICE_PORT": "8088",
+        "EXAMPLE_SERVICE_PORT_HTTP": "8088",
+        "EXAMPLE_PORT": "tcp://10.96.0.1:8088",
+        "EXAMPLE_PORT_8088_TCP": "tcp://10.96.0.1:8088",
+        "EXAMPLE_PORT_8088_TCP_ADDR": "10.96.0.1",
+    }
+
+    filtered = Cluster._filter_kubernetes_service_env_vars(env_vars)
+
+    assert filtered == {
+        "PATH": "/usr/bin",
+        "MASTER_PORT": "29500",
+        "RAY_HEAD_PORT": "6379",
+    }
+
+
 class EnvConfigCheckWorker(Worker):
     def __init__(self):
         super().__init__()

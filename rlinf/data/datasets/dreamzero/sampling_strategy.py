@@ -35,7 +35,9 @@ Config: ``num_frames``, ``max_chunk_size`` (macro blocks), ``action_horizon``.
 (Groot ``lerobot_sharded`` semantics).
 
 Config: ``max_chunk_size``, ``macro_stride`` (normally the action horizon), per-anchor micro
-offsets (video: 0,6,...,42; action: 0..H-1).
+offsets (video: 0,6,...,42; action: 0..H-1), plus an optional explicit
+video boundary offset.  The boundary is useful for non-uniform schedules such
+as ``0,1,3,...,15``.
 
 ::
 
@@ -76,6 +78,8 @@ class MultiAnchorTemporalConfig:
     macro_stride: int = 24
     action_horizon: int = 24
     video_in_chunk_offsets: tuple[int, ...] = DEFAULT_VIDEO_IN_CHUNK_OFFSETS
+    video_boundary_offset: int | None = None
+    required_window_extent: int | None = None
 
     def __post_init__(self) -> None:
         validate_multi_anchor_temporal_config(self)
@@ -105,6 +109,11 @@ def validate_multi_anchor_temporal_config(cfg: MultiAnchorTemporalConfig) -> Non
         raise ValueError(f"action_horizon must be positive, got {cfg.action_horizon!r}")
     if not cfg.video_in_chunk_offsets:
         raise ValueError("video_in_chunk_offsets must be non-empty")
+    if cfg.required_window_extent is not None and int(cfg.required_window_extent) < 0:
+        raise ValueError(
+            "required_window_extent must be non-negative when provided, got "
+            f"{cfg.required_window_extent!r}"
+        )
     offsets = tuple(int(o) for o in cfg.video_in_chunk_offsets)
     if any(o < 0 for o in offsets):
         raise ValueError(
@@ -116,7 +125,23 @@ def validate_multi_anchor_temporal_config(cfg: MultiAnchorTemporalConfig) -> Non
         )
     if len(set(offsets)) != len(offsets):
         raise ValueError(f"video_in_chunk_offsets must be unique, got {offsets!r}")
-    _video_micro_stride(cfg)
+    if cfg.video_boundary_offset is None:
+        _video_micro_stride(cfg)
+        return
+
+    boundary_offset = int(cfg.video_boundary_offset)
+    if boundary_offset <= offsets[-1]:
+        raise ValueError(
+            "video_boundary_offset must be after every in-chunk video offset, "
+            f"got boundary={boundary_offset}, offsets={offsets!r}"
+        )
+    if cfg.max_chunk_size > 1 and boundary_offset != cfg.macro_stride:
+        raise ValueError(
+            "A non-shared explicit video boundary is supported only when "
+            "max_chunk_size=1. For multiple chunks the boundary must equal "
+            f"macro_stride; got boundary={boundary_offset}, "
+            f"macro_stride={cfg.macro_stride}, max_chunk_size={cfg.max_chunk_size}."
+        )
 
 
 def _video_frames_per_chunk(cfg: MultiAnchorTemporalConfig) -> int:
@@ -140,6 +165,18 @@ def _video_micro_stride(cfg: MultiAnchorTemporalConfig) -> int:
     return step
 
 
+def _video_boundary_offset(cfg: MultiAnchorTemporalConfig) -> int:
+    """Return the final raw-video offset for one complete macro chunk."""
+    if cfg.video_boundary_offset is not None:
+        return int(cfg.video_boundary_offset)
+    return int(max(cfg.video_in_chunk_offsets) + _video_micro_stride(cfg))
+
+
+def _video_boundary_stride(cfg: MultiAnchorTemporalConfig) -> int:
+    """Distance from the last in-chunk video frame to the boundary frame."""
+    return int(_video_boundary_offset(cfg) - max(cfg.video_in_chunk_offsets))
+
+
 def _full_macro_window_extent(cfg: MultiAnchorTemporalConfig) -> int:
     """Max relative frame index needed by a complete macro chunk.
 
@@ -149,8 +186,9 @@ def _full_macro_window_extent(cfg: MultiAnchorTemporalConfig) -> int:
     ``t..t+47``.
     """
     return max(
-        max(cfg.video_in_chunk_offsets) + _video_micro_stride(cfg),
+        _video_boundary_offset(cfg),
         cfg.action_horizon - 1,
+        int(cfg.required_window_extent or 0),
     )
 
 
@@ -179,7 +217,7 @@ def sample_video_indices(
     frames_per_chunk = _video_frames_per_chunk(cfg)
     max_frames = frames_per_chunk * cfg.max_chunk_size + 1
     per_step_offsets = list(cfg.video_in_chunk_offsets)
-    boundary_stride = _video_micro_stride(cfg)
+    boundary_stride = _video_boundary_stride(cfg)
     sampled_list: list[int] = []
 
     def add_step_set(anchor_index: int) -> None:
@@ -371,28 +409,35 @@ def sample_temporal_indices(
     trajectory_length: int,
     cfg: MultiAnchorTemporalConfig,
 ) -> TemporalIndices:
-    """Sample video then action/state (video chunk count drives action/state)."""
-    video, num_chunks = sample_video_indices(
+    """Sample aligned modalities and return offsets relative to ``first_idx``.
+
+    The three modality-specific samplers operate on absolute episode indices so
+    they can search neighbouring language-compatible anchors.  Dataset readers,
+    however, add ``frame_in_ep`` when materialising a sample.  Convert exactly
+    once here; otherwise every non-zero dataset anchor is added twice.
+    """
+    video_absolute, num_chunks = sample_video_indices(
         first_idx, language_annotations, trajectory_length, cfg
     )
-    action = sample_action_indices(
+    action_absolute = sample_action_indices(
         first_idx,
         language_annotations,
         trajectory_length,
         cfg,
         target_num_chunks=num_chunks if num_chunks > 0 else None,
     )
-    state = sample_state_indices(
+    state_absolute = sample_state_indices(
         first_idx,
         language_annotations,
         trajectory_length,
         cfg,
         target_num_chunks=num_chunks if num_chunks > 0 else None,
     )
+    origin = np.int64(first_idx)
     return TemporalIndices(
-        video=video,
-        state=state,
-        action=action,
+        video=video_absolute - origin,
+        state=state_absolute - origin,
+        action=action_absolute - origin,
         num_video_chunks=num_chunks,
     )
 

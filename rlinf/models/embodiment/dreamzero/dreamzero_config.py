@@ -208,6 +208,77 @@ def validate_dreamzero_sft_model_cfg(model_cfg: DictConfig) -> DictConfig:
     assert int(action_horizon) > 0, (
         f"action_horizon must be positive, got {action_horizon!r}"
     )
+
+    # The explicit per-modality block contract below is currently guaranteed
+    # by the RoboTwin2 data path. Keep other DreamZero embodiments on their
+    # existing validation rules until their dataset timelines are migrated.
+    if str(model_cfg.get("embodiment_tag", "")) not in {"robotwin", "robotwin2"}:
+        return model_cfg
+
+    action_head_cfg = model_cfg.action_head_cfg.config
+    diffusion_model_cfg = action_head_cfg.diffusion_model_cfg
+    action_block_values = {
+        "model.action_horizon": model_cfg.get("action_horizon", None),
+        "model.num_action_per_block": model_cfg.get(
+            "num_action_per_block", None
+        ),
+        "action_head.action_horizon": action_head_cfg.get(
+            "action_horizon", None
+        ),
+        "action_head.num_action_per_block": action_head_cfg.get(
+            "num_action_per_block", None
+        ),
+        "diffusion_model.num_action_per_block": diffusion_model_cfg.get(
+            "num_action_per_block", None
+        ),
+    }
+    missing_action_blocks = [
+        name for name, value in action_block_values.items() if value is None
+    ]
+    if missing_action_blocks:
+        raise ValueError(
+            "DreamZero SFT requires an explicit action horizon at every model "
+            f"level; missing {missing_action_blocks}."
+        )
+    action_block_values = {
+        name: int(value) for name, value in action_block_values.items()
+    }
+    if len(set(action_block_values.values())) != 1:
+        raise ValueError(
+            "DreamZero action horizon/block mismatch: "
+            f"{action_block_values}"
+        )
+
+    head_frames_per_block = int(
+        action_head_cfg.get("num_frame_per_block", -1)
+    )
+    dit_frames_per_block = int(
+        diffusion_model_cfg.get("num_frame_per_block", -1)
+    )
+    expected_num_frames = 1 + 4 * int(max_chunk_size) * head_frames_per_block
+    if not (
+        head_frames_per_block == dit_frames_per_block
+        and int(num_frames) == expected_num_frames
+    ):
+        raise ValueError(
+            "DreamZero Wan VAE timeline mismatch: num_frames must equal "
+            "1 + 4 * max_chunk_size * num_frame_per_block, with equal "
+            "head/DiT num_frame_per_block; got "
+            f"num_frames={num_frames}, max_chunk_size={max_chunk_size}, "
+            f"head={head_frames_per_block}, DiT={dit_frames_per_block}."
+        )
+
+    if bool(action_head_cfg.get("use_motion_modality", False)):
+        motion_horizon = int(action_head_cfg.get("motion_horizon", -1))
+        motion_per_block = int(
+            diffusion_model_cfg.get("num_motion_per_block", -1)
+        )
+        if motion_horizon <= 0 or motion_horizon != motion_per_block:
+            raise ValueError(
+                "DreamZero motion timeline mismatch: action-head "
+                "motion_horizon and DiT num_motion_per_block must be equal and "
+                f"positive, got {motion_horizon}, {motion_per_block}."
+            )
     return model_cfg
 
 

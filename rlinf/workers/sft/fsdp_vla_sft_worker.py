@@ -25,6 +25,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from rlinf.config import SupportedModel
 from rlinf.models.embodiment.base_policy import ForwardType
+from rlinf.utils.distributed import all_reduce_dict
 from rlinf.utils.pytree import register_pytree_dataclasses
 from rlinf.utils.logging import get_logger
 from rlinf.utils.utils import get_rng_state, set_rng_state
@@ -199,6 +200,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             "motion_loss_weighted_per_sample",
             "timestep_motion_id",
             "motion_valid_mask",
+            "motion_point_valid_mask",
+            "motion_flow_valid_mask",
         ):
             value = debug.get(key)
             if value is None:
@@ -421,6 +424,14 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                 return build_robotwin2_sft_dataloader(
                     self.cfg, self._world_size, self._rank, data_paths, eval_dataset
                 )
+            if self.cfg.data.get("dataset_type", None) == "libero_motion":
+                from rlinf.data.datasets.dreamzero.libero_motion import (
+                    build_libero_motion_sft_dataloader,
+                )
+
+                return build_libero_motion_sft_dataloader(
+                    self.cfg, self._world_size, self._rank, data_paths, eval_dataset
+                )
             from rlinf.data.datasets.dreamzero import (
                 build_dreamzero_sft_dataloader,
             )
@@ -470,6 +481,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                         "motion_loss_weighted_per_sample",
                         "timestep_motion_id",
                         "motion_valid_mask",
+                        "motion_point_valid_mask",
+                        "motion_flow_valid_mask",
                     ):
                         debug_value = losses_dict.get(debug_key, None)
                         if debug_value is not None:
@@ -509,28 +522,40 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             in [SupportedModel.DREAMZERO, SupportedModel.WMAM]
             and self._dreamzero_loss is not None
         ):
-            train_metrics.update(
-                {
-                    "dynamics_loss": self._dreamzero_loss["dynamics_loss"]
+            component_metrics = {
+                "dynamics_loss": (
+                    self._dreamzero_loss["dynamics_loss"]
                     .detach()
                     .cpu()
-                    .item(),
-                    "action_loss": self._dreamzero_loss["action_loss"]
+                    .item()
+                ),
+                "action_loss": (
+                    self._dreamzero_loss["action_loss"]
                     .detach()
                     .cpu()
-                    .item(),
-                    **(
-                        {
-                            "motion_loss": self._dreamzero_loss["motion_loss"]
+                    .item()
+                ),
+                **(
+                    {
+                        "motion_loss": (
+                            self._dreamzero_loss["motion_loss"]
                             .detach()
                             .cpu()
                             .item()
-                        }
-                        if "motion_loss" in self._dreamzero_loss
-                        else {}
-                    ),
-                }
+                        )
+                    }
+                    if "motion_loss" in self._dreamzero_loss
+                    else {}
+                ),
+            }
+            # ``super().run_training()`` already reduced total loss, but these
+            # DreamZero component metrics are attached only afterwards.  Reduce
+            # them explicitly so TensorBoard describes the global batch rather
+            # than whichever rank owns the logger.
+            component_metrics = all_reduce_dict(
+                component_metrics, op=torch.distributed.ReduceOp.AVG
             )
+            train_metrics.update(component_metrics)
             self._dreamzero_loss = None
         self._maybe_log_spike_event(train_metrics)
         return train_metrics
@@ -557,6 +582,27 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         )
 
         torch.distributed.barrier()
+
+    def export_full_model_weights(self, output_path: str) -> None:
+        """Gather the restored FSDP model and save an unsharded state dict."""
+        restore_weight_offload = self.is_weight_offloaded
+        if restore_weight_offload:
+            self.load_param_and_grad(self.device)
+
+        state_dict = self.get_model_state_dict(
+            cpu_offload=True,
+            full_state_dict=True,
+        )
+        if self._rank == 0:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            self._strategy._atomic_torch_save(state_dict, output_path)
+            logger.info("Exported full model weights to %s", output_path)
+
+        del state_dict
+        torch.distributed.barrier()
+
+        if restore_weight_offload:
+            self.offload_param_and_grad()
 
     def load_checkpoint(self, load_path: str) -> None:
         super().load_checkpoint(load_path)

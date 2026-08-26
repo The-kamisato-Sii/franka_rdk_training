@@ -791,10 +791,10 @@ class _RealWorldJointDreamTransform:
         n_dims = min(int(action.shape[1]), self.max_action_dim)
         out = np.zeros((action.shape[0], self.max_action_dim), dtype=np.float32)
         out[:, :n_dims] = action[:, :n_dims]
-        # Padded action dimensions are real training targets too: their target
-        # value is zero after padding, and the action head should learn that
-        # full 32-D target/noise distribution instead of masking dimensions out.
-        mask = np.ones_like(out, dtype=bool)
+        # Match the official DreamZero transform: padded action dimensions are
+        # present in the model input, but are excluded from the action loss.
+        mask = np.zeros_like(out, dtype=bool)
+        mask[:, :n_dims] = True
         return out, mask
 
     def __call__(self, data: dict[str, Any]) -> dict[str, Any]:

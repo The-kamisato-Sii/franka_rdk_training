@@ -58,6 +58,10 @@ def main(cfg) -> None:
     )
 
     runner.init_workers()
+    export_path = cfg.runner.get("export_full_model_weights_path", None)
+    if export_path:
+        runner.export_full_model_weights(str(export_path))
+        return
     runner.run()
 
 

@@ -126,6 +126,15 @@ def get_model(cfg: DictConfig, torch_dtype=None):
             "DreamZero actor.model must resolve to a mapping after validate_sft_cfg()."
         )
 
+    # The FSDP checkpoint converter builds the complete architecture only to
+    # validate/load a full state_dict. Loading the original WAN/T5/CLIP/VAE
+    # component weights first is both redundant and very memory hungry. Keep
+    # this private flag out of the persisted DreamZero config and never enable
+    # it implicitly for training.
+    skip_components_for_conversion = bool(
+        config_dict.pop("skip_components_for_conversion", False)
+    )
+
     dreamzero_config = DreamZeroConfig(**config_dict)
 
     has_full_model_weights = False
@@ -141,11 +150,16 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         dreamzero_config.action_head_cfg["config"], dict
     ):
         dreamzero_config.action_head_cfg["config"]["defer_lora_injection"] = False
-        # If full DreamZero safetensors are absent, fall back to component loading from
-        # WAN paths in checkpoint config or preset YAML (diffusion / text / image / vae).
+        # If full DreamZero safetensors are absent, normally fall back to WAN
+        # component loading. The converter explicitly skips that redundant
+        # initialization because it immediately strict-loads a full FSDP state_dict.
         dreamzero_config.action_head_cfg["config"]["skip_component_loading"] = (
-            has_full_model_weights
+            has_full_model_weights or skip_components_for_conversion
         )
+        if skip_components_for_conversion:
+            print(
+                "[DreamZero] checkpoint conversion: skipping component weight loading"
+            )
 
     metadata = load_dreamzero_dataset_metadata(cfg)
     data_transforms = build_dreamzero_composed_transform(cfg, tokenizer_path)

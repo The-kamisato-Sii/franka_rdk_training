@@ -3,8 +3,9 @@ set -euo pipefail
 
 export HYDRA_FULL_ERROR=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_PATH="$(dirname "$(dirname "${SCRIPT_DIR}")")"
-export DREAMZERO_PATH=${DREAMZERO_PATH:-/inspire/hdd/project/robot-body/linbokai-CZXS24250037/dreamzero}
+REPO_PATH="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
+PROJECT_PATH="$(dirname "${REPO_PATH}")"
+export DREAMZERO_PATH=${DREAMZERO_PATH:-${PROJECT_PATH}/dreamzero}
 export PYTHONPATH="${DREAMZERO_PATH}:${PYTHONPATH:-}"
 export EMBODIED_PATH=${EMBODIED_PATH:-$(pwd)}
 
@@ -42,6 +43,22 @@ NNODES=${NNODES:-${PET_NNODES}}
 NODE_RANK=${NODE_RANK:-${PET_NODE_RANK}}
 export NUM_GPUS NNODES NODE_RANK
 CONFIG=${CONFIG:-real_world_joint_sft_dreamzero_5b}
+if [ -z "${REAL_WORLD_DATA_ROOT:-}" ]; then
+  if [ -d /inspire/dataset/real-world-motion/v1 ]; then
+    REAL_WORLD_DATA_ROOT=/inspire/dataset/real-world-motion/v1
+  else
+    REAL_WORLD_DATA_ROOT=/inspire/qb-ilm2/project/robot-body/public/real_world_data_dreamzero_motion_v2
+  fi
+fi
+export REAL_WORLD_DATA_ROOT
+export RUN_LOG_PATH=${RUN_LOG_PATH:-${REPO_PATH}/results_v3}
+export EXPERIMENT_NAME=${EXPERIMENT_NAME:-real_world_joint_sft_dreamzero_5b_v3}
+export TOKENIZER_DIR=${TOKENIZER_DIR:-${DREAMZERO_PATH}/checkpoints/umt5-xxl}
+export WAN22_CKPT_DIR=${WAN22_CKPT_DIR:-${DREAMZERO_PATH}/checkpoints/Wan2.2-TI2V-5B}
+export IMAGE_ENCODER_PATH=${IMAGE_ENCODER_PATH:-${DREAMZERO_PATH}/checkpoints/Wan2.1-I2V-14B-480P/models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth}
+
+ACTOR_MODEL_PRECISION=${ACTOR_MODEL_PRECISION:-fp32}
+export ACTOR_MODEL_PRECISION
 
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
@@ -126,9 +143,21 @@ fi
 
 echo "[RLinf] PET_NPROC_PER_NODE=${PET_NPROC_PER_NODE} PET_NNODES=${PET_NNODES} PET_NODE_RANK=${PET_NODE_RANK} MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
 echo "[RLinf] NUM_GPUS=${NUM_GPUS} NNODES=${NNODES} RLINF_NODE_RANK=${RLINF_NODE_RANK} RAY_ADDRESS=${RAY_ADDRESS} ACTOR_PLACEMENT=${ACTOR_PLACEMENT} CONFIG=${CONFIG}"
+echo "[RLinf] REAL_WORLD_DATA_ROOT=${REAL_WORLD_DATA_ROOT}"
+echo "[RLinf] precision override: actor.model.precision=${ACTOR_MODEL_PRECISION}"
+echo "[RLinf] outputs: ${RUN_LOG_PATH}/${EXPERIMENT_NAME}/{tensorboard,checkpoints}"
 
 if [ "${RLINF_WAIT_FOR_RAY_GPUS:-1}" = "1" ]; then
   bash "${REPO_PATH}/ray_utils/check_ray.sh" "${TOTAL_GPUS}"
 fi
 
-python examples/sft/train_vla_sft.py --config-name "${CONFIG}" cluster.num_nodes="${NNODES}" cluster.component_placement.actor="${ACTOR_PLACEMENT}" "$@"
+extra_args=(
+  runner.logger.log_path="${RUN_LOG_PATH}"
+  runner.logger.experiment_name="${EXPERIMENT_NAME}"
+  actor.model.precision="${ACTOR_MODEL_PRECISION}"
+)
+if [ -n "${RESUME_DIR:-}" ]; then
+  extra_args+=(runner.resume_dir="${RESUME_DIR}")
+fi
+
+python examples/sft/train_vla_sft.py --config-name "${CONFIG}" cluster.num_nodes="${NNODES}" cluster.component_placement.actor="${ACTOR_PLACEMENT}" "${extra_args[@]}" "$@"

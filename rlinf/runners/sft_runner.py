@@ -176,6 +176,15 @@ class SFTRunner:
         logger.info(f"Eval metrics: {evaluate_metrics}")
         self.metric_logger.finish()
 
+    def export_full_model_weights(self, output_path: str) -> None:
+        if self.cfg.runner.get("resume_dir", None) is None:
+            raise ValueError(
+                "runner.resume_dir is required when exporting local FSDP shards"
+            )
+        logger.info("Exporting restored FSDP weights to %s", output_path)
+        self.actor.export_full_model_weights(output_path).wait()
+        self.metric_logger.finish()
+
     def _save_checkpoint(self, is_best: bool = False) -> None:
         checkpoint_root = os.path.join(
             self.cfg.runner.logger.log_path,

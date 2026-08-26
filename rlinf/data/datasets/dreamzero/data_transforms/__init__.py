@@ -36,6 +36,7 @@ from rlinf.data.datasets.dreamzero.data_transforms.real_world_joint import (
     RealWorldJointDataTransform,
 )
 from rlinf.data.datasets.dreamzero.data_transforms.robotwin2 import (
+    RobotWinDataTransform,
     RobotWin2DataTransform,
 )
 from rlinf.data.datasets.dreamzero.real_world_joint import REAL_WORLD_JOINT_TAGS
@@ -44,6 +45,7 @@ _EMBODIMENT_REGISTRY: dict[str, type[DreamZeroEmbodimentTransform]] = {
     LiberoSimDataTransform.TAG: LiberoSimDataTransform,
     OxeDroidDataTransform.TAG: OxeDroidDataTransform,
     RealWorldJointDataTransform.TAG: RealWorldJointDataTransform,
+    RobotWinDataTransform.TAG: RobotWinDataTransform,
     RobotWin2DataTransform.TAG: RobotWin2DataTransform,
 }
 
