@@ -22,7 +22,11 @@ from tqdm import tqdm
 from rlinf.scheduler import WorkerGroupFuncResult as Handle
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.metric_logger import MetricLogger
-from rlinf.utils.runner_utils import EarlyStopController, check_progress
+from rlinf.utils.runner_utils import (
+    EarlyStopController,
+    check_progress,
+    prune_checkpoints_before_save,
+)
 
 if TYPE_CHECKING:
     from rlinf.workers.reward.reward_worker import FSDPRewardWorker
@@ -193,9 +197,16 @@ class SFTRunner:
         if is_best:
             base_output_dir = os.path.join(checkpoint_root, "checkpoints/best_model")
         else:
+            checkpoints_dir = os.path.join(checkpoint_root, "checkpoints")
+            prune_checkpoints_before_save(
+                checkpoints_dir=checkpoints_dir,
+                current_step=self.global_step,
+                max_checkpoints_to_keep=self.cfg.runner.get(
+                    "max_checkpoints_to_keep", None
+                ),
+            )
             base_output_dir = os.path.join(
-                checkpoint_root,
-                f"checkpoints/global_step_{self.global_step}",
+                checkpoints_dir, f"global_step_{self.global_step}"
             )
         actor_save_path = os.path.join(base_output_dir, "actor")
         os.makedirs(actor_save_path, exist_ok=True)

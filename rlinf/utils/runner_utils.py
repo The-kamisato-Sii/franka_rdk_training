@@ -13,12 +13,63 @@
 # limitations under the License.
 
 import os
+import re
+import shutil
 import tempfile
 from typing import Any, Union
 
 from rlinf.utils.logging import get_logger
 
 logger = get_logger()
+
+
+def prune_checkpoints_before_save(
+    checkpoints_dir: str,
+    current_step: int,
+    max_checkpoints_to_keep: int | None,
+) -> list[str]:
+    """Remove stale and oldest step checkpoints before writing a new one."""
+    if max_checkpoints_to_keep is None:
+        return []
+
+    max_checkpoints_to_keep = int(max_checkpoints_to_keep)
+    if max_checkpoints_to_keep <= 0:
+        return []
+
+    if not os.path.isdir(checkpoints_dir):
+        return []
+
+    removed_paths = []
+    current_checkpoint = os.path.join(
+        checkpoints_dir, f"global_step_{current_step}"
+    )
+    if os.path.isdir(current_checkpoint):
+        logger.warning(
+            f"Removing stale checkpoint directory before saving: {current_checkpoint}"
+        )
+        shutil.rmtree(current_checkpoint)
+        removed_paths.append(current_checkpoint)
+
+    step_checkpoints = []
+    for name in os.listdir(checkpoints_dir):
+        match = re.fullmatch(r"global_step_(\d+)", name)
+        path = os.path.join(checkpoints_dir, name)
+        if match is not None and os.path.isdir(path):
+            step_checkpoints.append((int(match.group(1)), path))
+
+    # Reserve one slot for the checkpoint that is about to be written.
+    step_checkpoints.sort(key=lambda item: item[0])
+    num_to_remove = max(
+        0, len(step_checkpoints) - (max_checkpoints_to_keep - 1)
+    )
+    for _, path in step_checkpoints[:num_to_remove]:
+        logger.info(
+            f"Removing old checkpoint before saving a new one: {path}"
+        )
+        shutil.rmtree(path)
+        removed_paths.append(path)
+
+    return removed_paths
 
 
 def safe_is_divisible(a, b):
